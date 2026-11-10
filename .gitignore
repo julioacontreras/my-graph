@@ -27,3 +27,4 @@ python/build/
 
 # Local docs
 /docs/
+.env

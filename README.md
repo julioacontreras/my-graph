@@ -33,7 +33,7 @@ or in the status table above, assume it is not supported.
 | What | Where | Install |
 |---|---|---|
 | Server (Docker image, amd64 + arm64) | Docker Hub [`julioacontreras/mygraph`](https://hub.docker.com/r/julioacontreras/mygraph), also `ghcr.io/julioacontreras/mygraph` | `docker pull julioacontreras/mygraph:latest` |
-| Python client + `mygraph-client` command | PyPI `mygraph-client` | `pip install mygraph-client` |
+| Python client + `mygraph-client` command | PyPI [`mygraph-client`](https://pypi.org/project/mygraph-client/) | `pip install mygraph-client` |
 | Python client from GitHub (no PyPI needed) | this repo, folder `python/` | `pip install "git+https://github.com/julioacontreras/my-graph.git#subdirectory=python"` |
 | Rust CLI `mygraph` | this repo | `cargo install --git https://github.com/julioacontreras/my-graph.git mygraph-cli` |
 

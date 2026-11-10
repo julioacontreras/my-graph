@@ -6,6 +6,8 @@ and needs only the standard library (Python ≥ 3.10).
 
 ## Install
 
+The package is on PyPI as [`mygraph-client`](https://pypi.org/project/mygraph-client/):
+
 ```bash
 pip install mygraph-client
 ```
@@ -145,3 +147,37 @@ python3 -m unittest discover -s tests -t .
 
 The integration tests build `mygraph-server` with cargo and start it on a
 free port. Set `MYGRAPH_SERVER_BIN` to use an existing binary instead.
+
+## Releasing to PyPI
+
+The workflow [`.github/workflows/pypi.yml`](../.github/workflows/pypi.yml)
+publishes the package when a tag that starts with `py-v` is pushed. It uses
+PyPI trusted publishing, so no API token or password is stored in GitHub.
+
+1. Increase `version` in [`pyproject.toml`](pyproject.toml), for example
+   `0.1.0` → `0.1.1`. PyPI does not accept a version number twice, even
+   after you delete a release.
+2. Commit and push the change to `main`.
+3. Create and push a tag with the same version:
+
+   ```bash
+   git tag py-v0.1.1
+   git push origin py-v0.1.1
+   ```
+
+4. Check the run in the repository's **Actions** tab. When it finishes, the
+   new version is on [PyPI](https://pypi.org/project/mygraph-client/).
+
+To check the package locally before you tag:
+
+```bash
+cd python
+uv build
+uvx twine check dist/*
+```
+
+The trusted publisher on PyPI is set for repository
+`julioacontreras/my-graph`, workflow `pypi.yml` and environment `pypi`.
+If you rename one of these, update the publisher in the project's
+**Publishing** settings on PyPI. If you don't, the upload fails with
+`invalid-publisher`.
