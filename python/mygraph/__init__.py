@@ -23,7 +23,7 @@ from .errors import (
     TransactionError,
 )
 from .transaction import Transaction
-from .types import Node, Relationship, Result, Stats
+from .types import Node, Path, Relationship, Result, Stats
 
 __version__ = "0.1.0"
 
@@ -35,6 +35,7 @@ __all__ = [
     "MyGraphError",
     "Node",
     "NotFoundError",
+    "Path",
     "ProtocolError",
     "QueryError",
     "Relationship",

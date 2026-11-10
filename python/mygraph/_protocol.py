@@ -12,7 +12,7 @@ import struct
 from typing import Any
 
 from .errors import ConnectionClosedError, ProtocolError
-from .types import Node, Relationship
+from .types import Node, Path, Relationship
 
 PROTOCOL_VERSION = 1
 MAX_PAYLOAD = 64 * 1024 * 1024
@@ -39,7 +39,7 @@ GOODBYE = 0x40
 ERROR = 0x7F
 
 # Value tags
-T_NULL, T_BOOL, T_INT, T_FLOAT, T_STRING, T_BYTES, T_LIST, T_MAP, T_NODE, T_REL = range(10)
+T_NULL, T_BOOL, T_INT, T_FLOAT, T_STRING, T_BYTES, T_LIST, T_MAP, T_NODE, T_REL, T_PATH = range(11)
 
 _I64_MIN, _I64_MAX = -(2**63), 2**63 - 1
 
@@ -88,7 +88,7 @@ def encode_value(buf: bytearray, v: Any, depth: int = 0) -> None:
     elif isinstance(v, dict):
         buf.append(T_MAP)
         encode_map(buf, v, depth + 1)
-    elif isinstance(v, (Node, Relationship)):
+    elif isinstance(v, (Node, Relationship, Path)):
         raise TypeError(f"{type(v).__name__} values cannot be sent as parameters; pass its id instead")
     else:
         raise TypeError(f"cannot send a value of type {type(v).__name__}")
@@ -173,6 +173,14 @@ class Decoder:
         if t == T_REL:
             rel_id, start, end = self._u64(), self._u64(), self._u64()
             return Relationship(rel_id, start, end, self._str(), self.map(depth + 1))
+        if t == T_PATH:
+            nodes = [self.value(depth + 1) for _ in range(self._count())]
+            rels = [self.value(depth + 1) for _ in range(self._count())]
+            if not all(isinstance(n, Node) for n in nodes) or not all(isinstance(r, Relationship) for r in rels):
+                raise ProtocolError("a path must contain nodes and relationships")
+            if len(nodes) != len(rels) + 1:
+                raise ProtocolError("a path needs one more node than relationships")
+            return Path(nodes, rels)
         raise ProtocolError(f"unknown value tag {t}")
 
     def map(self, depth: int = 0) -> dict:

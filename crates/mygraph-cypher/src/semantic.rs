@@ -23,7 +23,17 @@ pub fn check_query(q: &Query) -> Result<()> {
             }
             Clause::Create { patterns } => {
                 for p in patterns {
+                    if p.name.is_some() || p.shortest.is_some() {
+                        return Err(MyGraphError::Semantic(
+                            "named paths and shortestPath are not supported in CREATE".into(),
+                        ));
+                    }
                     for (r, _) in &p.steps {
+                        if r.length.is_some() {
+                            return Err(MyGraphError::Semantic(
+                                "variable-length relationships cannot be created".into(),
+                            ));
+                        }
                         if let Some(v) = &r.variable {
                             if scope.contains(v) {
                                 return Err(MyGraphError::Semantic(format!(

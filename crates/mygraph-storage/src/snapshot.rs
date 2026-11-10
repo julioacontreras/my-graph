@@ -2,6 +2,8 @@
 //!
 //! Layout: `MAGIC (8) | format version u16 | body length u64 | body | crc32(body) u32`.
 //! The body starts with the WAL sequence number (LSN) the snapshot includes.
+//! Version 2 adds the property-index definitions of each schema; version 1
+//! files (no indexes) are still read.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -12,7 +14,7 @@ use mygraph_core::{Catalog, Change, Graph, GraphDatabase, MyGraphError, Result, 
 use crate::codec::{Decoder, Encoder};
 
 const MAGIC: &[u8; 8] = b"MYGRSNAP";
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 
 pub fn encode(catalog: &Catalog, lsn: u64) -> Result<Vec<u8>> {
     let mut b = Encoder::default();
@@ -48,6 +50,13 @@ pub fn encode(catalog: &Catalog, lsn: u64) -> Result<Vec<u8>> {
                 b.str(g.rel_type_name(r.rel_type))?;
                 b.properties(&r.properties)?;
             }
+            let indexes = g.indexes();
+            b.u32(indexes.len() as u32);
+            for i in indexes {
+                b.str(&i.name)?;
+                b.str(&i.label)?;
+                b.str(&i.key)?;
+            }
         }
     }
 
@@ -67,7 +76,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Catalog, u64)> {
     }
     let mut h = Decoder::new(&bytes[8..18]);
     let version = h.u16()?;
-    if version != FORMAT_VERSION {
+    if version != FORMAT_VERSION && version != 1 {
         return Err(MyGraphError::Storage(format!(
             "snapshot format version {version} is not supported (expected {FORMAT_VERSION})"
         )));
@@ -112,6 +121,11 @@ pub fn decode(bytes: &[u8]) -> Result<(Catalog, u64)> {
                     rel_type: d.str()?,
                     properties: d.properties()?,
                 })?;
+            }
+            if version >= 2 {
+                for _ in 0..d.u32()? {
+                    graph.apply(&Change::CreateIndex { name: d.str()?, label: d.str()?, key: d.str()? })?;
+                }
             }
             db.insert_schema(Schema { id, name, graph });
         }

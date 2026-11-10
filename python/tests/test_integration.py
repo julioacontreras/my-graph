@@ -75,6 +75,22 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(r.single(), {"x": 42, "s": "hi", "l": [1, 2.5, None]})
         self.assertEqual(r.database, self.dbname)
 
+    def test_index_and_paths(self):
+        self.db.run("CREATE INDEX ON :Step(n)")
+        self.db.run("UNWIND range(0, 4) AS i CREATE (:Step {n: i})")
+        self.db.run("MATCH (a:Step), (b:Step) WHERE b.n = a.n + 1 CREATE (a)-[:NEXT]->(b)")
+        self.assertEqual(self.db.run("SHOW INDEXES").single()["entries"], 5)
+        r = self.db.run(
+            "MATCH (a:Step {n: 0}), (b:Step {n: 4}), p = shortestPath((a)-[:NEXT*]->(b)) RETURN p, length(p) AS len"
+        ).single()
+        path = r["p"]
+        self.assertIsInstance(path, mygraph.Path)
+        self.assertEqual((len(path), r["len"]), (4, 4))
+        self.assertEqual([n["n"] for n in path.nodes], [0, 1, 2, 3, 4])
+        self.assertEqual([rel.type for rel in path.relationships], ["NEXT"] * 4)
+        far = self.db.run("MATCH (:Step {n: 1})-[:NEXT*2..]->(x) RETURN x.n AS n ORDER BY n").records()
+        self.assertEqual([row["n"] for row in far], [3, 4])
+
     # ------------------------------------------------------------ nodes
 
     def test_node_crud(self):

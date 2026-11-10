@@ -131,6 +131,28 @@ impl Parser<'_> {
     // ---- statements ----
 
     fn statement(&mut self) -> Result<Statement> {
+        if self.is_kw("CREATE")
+            && (self.is_kw_at(1, "INDEX") || (self.is_kw_at(1, "RANGE") && self.is_kw_at(2, "INDEX")))
+        {
+            return self.create_index();
+        }
+        if self.is_kw("DROP") && self.is_kw_at(1, "INDEX") {
+            self.advance();
+            self.advance();
+            let target = if self.eat_kw("ON") {
+                let (label, key) = self.memgraph_index_target()?;
+                IndexTarget::On { label, key }
+            } else {
+                IndexTarget::Name(self.ident("an index name or `ON`")?)
+            };
+            let if_exists = if self.eat_kw("IF") {
+                self.expect_kw("EXISTS")?;
+                true
+            } else {
+                false
+            };
+            return Ok(Statement::Admin(AdminCommand::DropIndex { target, if_exists }));
+        }
         if self.is_kw("CREATE") && (self.is_kw_at(1, "DATABASE") || self.is_kw_at(1, "SCHEMA")) {
             self.advance();
             let is_db = self.eat_kw("DATABASE");
@@ -154,7 +176,7 @@ impl Parser<'_> {
         if self.eat_kw("DROP") {
             let is_db = self.eat_kw("DATABASE");
             if !is_db && !self.eat_kw("SCHEMA") {
-                return Err(self.error("expected `DATABASE` or `SCHEMA` (indexes are not supported yet)"));
+                return Err(self.error("expected `DATABASE`, `SCHEMA` or `INDEX`"));
             }
             let if_exists = if self.eat_kw("IF") {
                 self.expect_kw("EXISTS")?;
@@ -183,7 +205,10 @@ impl Parser<'_> {
             if self.eat_kw("SCHEMAS") {
                 return Ok(Statement::Admin(AdminCommand::ShowSchemas));
             }
-            return Err(self.error("expected `DATABASES` or `SCHEMAS`"));
+            if self.eat_kw("INDEXES") || self.eat_kw("INDEX") {
+                return Ok(Statement::Admin(AdminCommand::ShowIndexes));
+            }
+            return Err(self.error("expected `DATABASES`, `SCHEMAS` or `INDEXES`"));
         }
         if self.eat_kw("BEGIN") {
             return Ok(Statement::Begin);
@@ -195,6 +220,56 @@ impl Parser<'_> {
             return Ok(Statement::Rollback);
         }
         Ok(Statement::Query(self.query()?))
+    }
+
+    /// `CREATE [RANGE] INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON (n.key)` (Neo4j)
+    /// or `CREATE INDEX ON :Label(key)` (Memgraph).
+    fn create_index(&mut self) -> Result<Statement> {
+        self.expect_kw("CREATE")?;
+        self.eat_kw("RANGE");
+        self.expect_kw("INDEX")?;
+        if self.eat_kw("ON") {
+            let (label, key) = self.memgraph_index_target()?;
+            // Memgraph treats an existing index as success
+            return Ok(Statement::Admin(AdminCommand::CreateIndex { name: None, label, key, if_not_exists: true }));
+        }
+        let name = if self.is_kw("IF") || self.is_kw("FOR") { None } else { Some(self.ident("an index name")?) };
+        let if_not_exists = if self.eat_kw("IF") {
+            self.expect_kw("NOT")?;
+            self.expect_kw("EXISTS")?;
+            true
+        } else {
+            false
+        };
+        self.expect_kw("FOR")?;
+        self.expect(&Tok::LParen, "`(`")?;
+        let var = self.ident("a variable")?;
+        self.expect(&Tok::Colon, "`:`")?;
+        let label = self.ident("a label")?;
+        self.expect(&Tok::RParen, "`)`")?;
+        self.expect_kw("ON")?;
+        self.expect(&Tok::LParen, "`(`")?;
+        let v2 = self.ident("a variable")?;
+        if v2 != var {
+            return Err(self.error(format!("expected variable `{var}`")));
+        }
+        self.expect(&Tok::Dot, "`.`")?;
+        let key = self.ident("a property name")?;
+        if self.peek() == &Tok::Comma {
+            return Err(self.error("composite indexes are not supported yet"));
+        }
+        self.expect(&Tok::RParen, "`)`")?;
+        Ok(Statement::Admin(AdminCommand::CreateIndex { name, label, key, if_not_exists }))
+    }
+
+    /// `:Label(key)`
+    fn memgraph_index_target(&mut self) -> Result<(String, String)> {
+        self.expect(&Tok::Colon, "`:`")?;
+        let label = self.ident("a label")?;
+        self.expect(&Tok::LParen, "`(`")?;
+        let key = self.ident("a property name")?;
+        self.expect(&Tok::RParen, "`)`")?;
+        Ok((label, key))
     }
 
     fn query(&mut self) -> Result<Query> {
@@ -376,8 +451,21 @@ impl Parser<'_> {
     }
 
     fn path(&mut self) -> Result<PathPattern> {
+        let mut name = None;
         if matches!(self.peek(), Tok::Ident(_) | Tok::QuotedIdent(_)) && matches!(self.peek_at(1), Tok::Eq) {
-            return Err(self.error("named paths are not supported yet"));
+            name = Some(self.ident("a path name")?);
+            self.advance();
+        }
+        let shortest = if self.is_kw("shortestPath") && matches!(self.peek_at(1), Tok::LParen) {
+            Some(Shortest::One)
+        } else if self.is_kw("allShortestPaths") && matches!(self.peek_at(1), Tok::LParen) {
+            Some(Shortest::All)
+        } else {
+            None
+        };
+        if shortest.is_some() {
+            self.advance();
+            self.advance();
         }
         let start = self.node_pattern()?;
         let mut steps = Vec::new();
@@ -386,7 +474,44 @@ impl Parser<'_> {
             let node = self.node_pattern()?;
             steps.push((rel, node));
         }
-        Ok(PathPattern { start, steps })
+        if shortest.is_some() {
+            self.expect(&Tok::RParen, "`)` to close shortestPath")?;
+            if steps.len() != 1 {
+                return Err(self.error("shortestPath needs a pattern with exactly one relationship"));
+            }
+            if steps[0].0.length.is_some_and(|l| l.min > 1) {
+                return Err(self.error("shortestPath supports a minimum length of 0 or 1 only"));
+            }
+        }
+        Ok(PathPattern { name, shortest, start, steps })
+    }
+
+    /// After `*`: `n`, `n..`, `..m`, `n..m` or nothing.
+    fn var_length(&mut self) -> Result<VarLength> {
+        let int = |p: &mut Self| -> Result<Option<u32>> {
+            match p.peek().clone() {
+                Tok::Int(i) => {
+                    p.advance();
+                    u32::try_from(i).map(Some).map_err(|_| p.error("relationship length out of range"))
+                }
+                _ => Ok(None),
+            }
+        };
+        let first = int(self)?;
+        if self.peek() == &Tok::Dot && self.peek_at(1) == &Tok::Dot {
+            self.advance();
+            self.advance();
+            let max = int(self)?;
+            let min = first.unwrap_or(1);
+            if max.is_some_and(|m| m < min) {
+                return Err(self.error("the maximum length is smaller than the minimum"));
+            }
+            return Ok(VarLength { min, max });
+        }
+        Ok(match first {
+            Some(n) => VarLength { min: n, max: Some(n) },
+            None => VarLength { min: 1, max: None },
+        })
     }
 
     fn properties(&mut self) -> Result<Option<Expr>> {
@@ -416,7 +541,7 @@ impl Parser<'_> {
     fn rel_pattern(&mut self) -> Result<RelPattern> {
         let left = self.eat(&Tok::Lt);
         self.expect(&Tok::Minus, "`-`")?;
-        let (mut variable, mut types, mut properties) = (None, Vec::new(), None);
+        let (mut variable, mut types, mut properties, mut length) = (None, Vec::new(), None, None);
         if self.eat(&Tok::LBracket) {
             if matches!(self.peek(), Tok::Ident(_) | Tok::QuotedIdent(_)) {
                 variable = Some(self.ident("a variable")?);
@@ -428,8 +553,8 @@ impl Parser<'_> {
                     types.push(self.ident("a relationship type")?);
                 }
             }
-            if matches!(self.peek(), Tok::Star) {
-                return Err(self.error("variable-length relationships are not supported yet"));
+            if self.eat(&Tok::Star) {
+                length = Some(self.var_length()?);
             }
             properties = self.properties()?;
             self.expect(&Tok::RBracket, "`]` to close the relationship pattern")?;
@@ -442,7 +567,7 @@ impl Parser<'_> {
             (false, false) => Direction::Both,
             (true, true) => return Err(self.error("a relationship cannot point in both directions")),
         };
-        Ok(RelPattern { variable, types, properties, direction })
+        Ok(RelPattern { variable, types, properties, direction, length })
     }
 
     // ---- expressions (lowest to highest precedence) ----

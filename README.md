@@ -5,13 +5,14 @@ Property-graph database written in Rust, queried with Cypher.
 If you only want to *use* the database (including AI agents), read
 [Quick reference](#quick-reference) first.
 
-## Status: v0.1 (vertical slice)
+## Status: v0.2
 
 | Area | Implemented |
 |---|---|
 | Model | Directed property graph: nodes with multiple labels, typed relationships, properties (`null`, bool, int, float, string, bytes, list, map) |
 | Databases / schemas | Multiple databases with isolated schemas; `CREATE/DROP/USE DATABASE`, `CREATE/DROP/USE SCHEMA`, `SHOW DATABASES/SCHEMAS` |
-| Cypher | `MATCH`, `OPTIONAL MATCH`, `WHERE`, `CREATE`, `SET` (`=`, `+=`, labels), `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` (`DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`), `count/sum/avg/min/max/collect`, `CASE`, parameters, scalar functions; errors carry line/column |
+| Cypher | `MATCH`, `OPTIONAL MATCH`, `WHERE`, variable-length relationships (`-[:T*1..5]->`), named paths (`p = ...`), `shortestPath` / `allShortestPaths`, `CREATE`, `SET` (`=`, `+=`, labels), `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` (`DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`), `count/sum/avg/min/max/collect`, `CASE`, parameters, scalar functions; errors carry line/column |
+| Indexes and planning | Label index; property equality indexes (`CREATE INDEX FOR (n:L) ON (n.p)` or `CREATE INDEX ON :L(p)`, `DROP INDEX`, `SHOW INDEXES`), used by inline properties, `WHERE n.p = x` and `IN`; `id(n) = x` lookups; each path starts from its most selective node and `WHERE` is checked as soon as its variables are bound |
 | Transactions | Auto-commit per statement; explicit transactions with commit/rollback (rollback on drop); statement-level atomicity |
 | Storage | WAL (CRC32, fsync on commit) + snapshot checkpoints, crash recovery, torn-write detection, exclusive directory lock |
 | API | Embedded `Database::in_memory()` / `Database::open(path_or_config)`, `params!` |
@@ -19,13 +20,13 @@ If you only want to *use* the database (including AI agents), read
 | Server | `mygraph-server start`: TCP, [protocol v1](PROTOCOL.md), one session per connection, explicit transactions |
 | Python client | [`python/`](python/README.md): `run(cypher)`, CRUD helpers for nodes/relationships, transactions; standard library only |
 
-Not yet: `MERGE`, variable-length paths, indexes beyond the label index,
-query planner, MVCC/concurrent writers, page-based storage, authentication
+Not yet: `MERGE`, `UNION`, range or composite indexes, a cost-based
+planner, MVCC/concurrent writers, page-based storage, authentication
 (AUTH is accepted but not checked), TLS, import/export, security.
 
 ## Quick reference
 
-Everything below was checked against v0.1. If a feature is not listed here
+Everything below was checked against v0.2. If a feature is not listed here
 or in the status table above, assume it is not supported.
 
 ### Published packages
@@ -119,7 +120,7 @@ ends with `;`. Use `BEGIN;`, `COMMIT;` and `ROLLBACK;` for transactions, and
 
 ```text
 $ mygraph shell --host localhost
-MyGraph v0.1.0 (connected to localhost:6660)
+MyGraph v0.2.0 (connected to localhost:6660)
 End statements with `;`. Type EXIT; to quit.
 mygraph[default/public]> MATCH (n) RETURN count(n) AS c;
 +---+
@@ -163,6 +164,7 @@ mygraph query --host localhost --json "MATCH (u:User)-[r:KNOWS]->(f) RETURN u, r
 ```
 
 - Node: `{"id", "labels", "properties"}`. Relationship: `{"id", "type", "start", "end", "properties"}`.
+  Path: `{"nodes": [node, ...], "relationships": [relationship, ...]}`.
 - No rows: `[]`. A write without `RETURN` prints `[]` with `--json`. Without
   `--json` it prints a summary such as
   `nodes created: 2, relationships created: 1, properties set: 4, labels added: 2`.
@@ -184,6 +186,8 @@ per record.
   statement is committed on its own.
 - Node and relationship ids are integers given by the engine. Use
   `id(n)` to match them: `MATCH (n) WHERE id(n) = 0 RETURN n`.
+- Property indexes are **not** created automatically. See
+  [Indexes](#6-indexes-you-create-them).
 - An open transaction blocks all other connections. Keep it short.
 
 ### 5. Cypher examples
@@ -192,15 +196,25 @@ per record.
 // Create nodes and a relationship in one pattern
 CREATE (a:User {name: 'Alice', age: 30})-[:KNOWS {since: 2020}]->(b:User {name: 'Bob', age: 25})
 
-// Connect two existing nodes (there is no MERGE: run MATCH first to avoid duplicates)
+// Index the lookup key, then connect existing nodes (there is no MERGE: run MATCH first to avoid duplicates)
+CREATE INDEX FOR (u:User) ON (u.name)
 MATCH (a:User {name: 'Alice'}), (c:User {name: 'Carol'}) CREATE (a)-[:KNOWS]->(c)
+UNWIND $edges AS e MATCH (a:User {name: e.from}), (b:User {name: e.to}) CREATE (a)-[:KNOWS]->(b)
 
 // Read with a filter, ordering and paging
 MATCH (u:User) WHERE u.age >= 18 AND u.name STARTS WITH 'A'
 RETURN u.name AS name, u.age AS age ORDER BY age DESC SKIP 0 LIMIT 20
 
-// Traverse a fixed number of hops (variable-length paths are not supported)
+// Traverse a fixed number of hops
 MATCH (a:User {name: 'Alice'})-[:KNOWS]->()-[:KNOWS]->(fof) RETURN DISTINCT fof.name AS name
+
+// Variable-length paths: *, *3, *1..3, *2.., *..4 (every relationship is used at most once)
+MATCH (a:User {name: 'Alice'})-[:KNOWS|FOLLOWS*1..3]->(x) RETURN DISTINCT x.name AS name
+MATCH p = (a:User {name: 'Alice'})-[r:KNOWS*]->(b) RETURN b.name, length(p), size(r)
+
+// Shortest paths between bound nodes (WHERE is checked after the search)
+MATCH (a:User {name: 'Alice'}), (b:User {name: 'Dave'}), p = shortestPath((a)-[:KNOWS*..10]-(b))
+RETURN length(p) AS hops, nodes(p) AS people
 
 // Aggregate
 MATCH (u:User) RETURN count(u) AS users, avg(u.age) AS avg_age, collect(u.name) AS names
@@ -234,17 +248,65 @@ Identifiers with spaces or reserved words go in backticks: `` `my label` ``.
 |---|---|
 | Aggregation | `count(*)`, `count(x)`, `sum`, `avg`, `min`, `max`, `collect` |
 | Graph | `id`, `labels`, `type`, `properties`, `keys`, `startNode`, `endNode` |
+| Path | `length`, `nodes`, `relationships` |
 | String | `toUpper`, `toLower`, `trim`, `ltrim`, `rtrim`, `replace`, `split`, `substring`, `left`, `right`, `reverse`, `size` |
 | List | `size`, `head`, `last`, `tail`, `range`, `reverse` |
 | Number | `abs`, `ceil`, `floor`, `round`, `sign`, `sqrt` |
 | Conversion | `toInteger`, `toFloat`, `toString`, `toBoolean`, `coalesce` |
 | Other | `length`, `timestamp` |
 
-**Not supported in v0.1:** `MERGE`, variable-length paths (`-[*1..3]->`)
-and regular expressions (`=~`) fail with `syntax error ... not supported yet`.
-Indexes and constraints (`CREATE INDEX`) and `CALL` / procedures fail with
-an ordinary syntax error. To do an upsert, run `MATCH` first and `CREATE`
+**Not supported in v0.2:** `MERGE` and regular expressions (`=~`) fail with
+`syntax error ... not supported yet`. Constraints, composite indexes and
+`CALL` / procedures fail with an ordinary syntax error. To do an upsert, run `MATCH` first and `CREATE`
 only when it returns no rows.
+
+### 6. Indexes: you create them
+
+**What is automatic** (nothing to do):
+
+- The label index: `MATCH (n:User)` only visits `:User` nodes.
+- Lookups by id: `MATCH (n) WHERE id(n) = $id` (or `id(n) IN $ids`) goes
+  straight to the node.
+- The query planner: each pattern starts from its most selective node (a
+  variable that is already bound, then `id()`, then an index, then the
+  label with the fewest nodes), and every `WHERE` condition joined by `AND`
+  is checked as soon as its variables are bound. You can write the pattern
+  in any order.
+
+**What is not automatic:** indexes on properties. Without an index,
+`MATCH (n:User {name: 'Alice'})` reads every `:User` node. With 50,000
+nodes and 100,000 relationships, a batch load that connects nodes by a key
+goes from many minutes to under a second once that key has an index.
+
+```cypher
+CREATE INDEX FOR (u:User) ON (u.name)        // Neo4j syntax; optional name: CREATE INDEX user_name FOR ...
+CREATE INDEX ON :User(name)                  // Memgraph syntax; does nothing if the index exists
+CREATE INDEX IF NOT EXISTS FOR (u:User) ON (u.name)
+SHOW INDEXES                                 // name, label, property, entries
+DROP INDEX user_name                         // by name (the default name is index_<Label>_<property>)
+DROP INDEX ON :User(name)                    // by label and property
+```
+
+Create an index on every property you use to find nodes, in particular the
+key used to connect nodes while loading. You can create it before or after
+loading: an index on existing data is filled when it is created. Indexes
+are kept up to date on every write, are saved with the data, and belong to
+the current schema (create them in each schema that needs them).
+
+An index is used when the node pattern has the indexed label and the
+property is compared for equality with a value known at that point:
+
+| Uses the index on `:User(name)` | Does not |
+|---|---|
+| `MATCH (u:User {name: $n})` | `MATCH (u {name: $n})` (no label) |
+| `MATCH (u:User) WHERE u.name = $n` | `WHERE u.name STARTS WITH 'A'`, `<`, `>`, `CONTAINS` |
+| `MATCH (u:User) WHERE u.name IN $names` | `WHERE toLower(u.name) = 'alice'` |
+| `UNWIND $rows AS r MATCH (u:User {name: r.name})` | `WHERE u.name = 'a' OR u.name = 'b'` (use `IN`) |
+
+Indexed values are booleans, integers, floats and strings (`1` and `1.0`
+are the same key). Lists and maps are not indexed. A lookup with one of them
+falls back to a scan, and so does a lookup with an integer beyond ±2^53.
+Results are the same with or without an index, only the speed changes.
 
 ## Usage
 
@@ -279,6 +341,50 @@ with mygraph.connect("localhost", 6660) as db:
     db.update_node(alice.id, {"age": 26})
     db.delete_node(alice.id)
 ```
+
+## Releasing
+
+Versions are listed in [CHANGELOG.md](CHANGELOG.md).
+
+### Server (Docker image)
+
+The workflow [`.github/workflows/docker.yml`](.github/workflows/docker.yml)
+builds the image for amd64 and arm64 and pushes it to Docker Hub
+(`julioacontreras/mygraph`) and GHCR (`ghcr.io/julioacontreras/mygraph`)
+when a tag that starts with `v` is pushed. A tag `vX.Y.Z` publishes the
+image tags `X.Y.Z`, `X.Y`, `latest` and `sha-<commit>`. It needs the
+repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`.
+
+1. Increase `version` in the root [`Cargo.toml`](Cargo.toml)
+   (`[workspace.package]`), for example `0.2.0` → `0.2.1`. Every crate,
+   the CLI banner and the server's handshake take it from there.
+2. Add the version to [CHANGELOG.md](CHANGELOG.md), with upgrade notes if
+   the snapshot or protocol format changed.
+3. Check, then commit and push to `main`:
+
+   ```bash
+   cargo fmt --all -- --check && cargo clippy --workspace --all-targets && cargo test --workspace
+   (cd python && python3 -m unittest discover -s tests)
+   git push origin main
+   ```
+
+4. Create and push the tag (`v` + the version in `Cargo.toml`):
+
+   ```bash
+   git tag v0.2.1
+   git push origin v0.2.1
+   ```
+
+5. Check the run in the repository's **Actions** tab, then
+   `docker pull julioacontreras/mygraph:0.2.1`.
+
+To build the image locally: `docker build -t mygraph:dev .`
+
+### Python client (PyPI)
+
+See [python/README.md](python/README.md#releasing-to-pypi). It has its own
+version and its own tags (`py-vX.Y.Z`). Release it too when the protocol
+changes, so the client can read the new values.
 
 ## Workspace
 

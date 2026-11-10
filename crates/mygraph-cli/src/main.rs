@@ -367,6 +367,12 @@ fn json_value(v: &Value) -> String {
             r.end_node,
             json_map(r.properties.iter())
         ),
+        Value::Path(p) => {
+            let nodes: Vec<String> = p.nodes.iter().map(|n| json_value(&Value::Node(Box::new(n.clone())))).collect();
+            let rels: Vec<String> =
+                p.relationships.iter().map(|r| json_value(&Value::Relationship(Box::new(r.clone())))).collect();
+            format!("{{\"nodes\":[{}],\"relationships\":[{}]}}", nodes.join(","), rels.join(","))
+        }
     }
 }
 

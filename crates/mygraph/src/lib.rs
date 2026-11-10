@@ -19,8 +19,8 @@ mod result;
 
 use std::sync::{Mutex, MutexGuard};
 
-use mygraph_core::{Catalog, Journal, Op, WriteContext, DEFAULT_DATABASE, DEFAULT_SCHEMA};
-use mygraph_cypher::{AdminCommand, ExecResult, Query, Statement};
+use mygraph_core::{Catalog, Change, Journal, Op, WriteContext, DEFAULT_DATABASE, DEFAULT_SCHEMA};
+use mygraph_cypher::{AdminCommand, ExecResult, IndexTarget, Query, Statement};
 use mygraph_storage::{RecoveryInfo, Store, StoreConfig};
 
 pub use config::Config;
@@ -262,9 +262,66 @@ impl Inner {
         self.maybe_checkpoint()
     }
 
+    /// Applies one schema-level change (index DDL) in its own transaction.
+    fn apply_schema_change(&mut self, db: &str, schema: &str, change: Change) -> Result<()> {
+        let mut journal = Journal::default();
+        let (graph, ids) = self.catalog.database_mut(db)?.write_parts(schema)?;
+        WriteContext::new(graph, ids, &mut journal).apply(change)?;
+        self.persist(db, schema, journal)
+    }
+
     fn run_admin(&mut self, session: &mut SessionState, cmd: &AdminCommand) -> Result<QueryResult> {
         let current_db = session.database.clone();
         match cmd {
+            AdminCommand::CreateIndex { name, label, key, if_not_exists } => {
+                let name = name.clone().unwrap_or_else(|| format!("index_{label}_{key}"));
+                let graph = &self.catalog.database(&current_db)?.schema(&session.schema)?.graph;
+                let exists = graph.has_index(label, key) || graph.index_by_name(&name).is_some();
+                if !(*if_not_exists && exists) {
+                    let change = Change::CreateIndex { name, label: label.clone(), key: key.clone() };
+                    self.apply_schema_change(&current_db, &session.schema.clone(), change)?;
+                }
+            }
+            AdminCommand::DropIndex { target, if_exists } => {
+                let graph = &self.catalog.database(&current_db)?.schema(&session.schema)?.graph;
+                let found = match target {
+                    IndexTarget::Name(n) => graph.index_by_name(n),
+                    IndexTarget::On { label, key } => graph.has_index(label, key).then(|| (label.clone(), key.clone())),
+                };
+                match found {
+                    Some((label, key)) => self.apply_schema_change(
+                        &current_db,
+                        &session.schema.clone(),
+                        Change::DropIndex { label, key },
+                    )?,
+                    None if *if_exists => {}
+                    None => {
+                        return Err(MyGraphError::NotFound(match target {
+                            IndexTarget::Name(n) => format!("index `{n}`"),
+                            IndexTarget::On { label, key } => format!("index on :{label}({key})"),
+                        }))
+                    }
+                }
+            }
+            AdminCommand::ShowIndexes => {
+                let graph = &self.catalog.database(&current_db)?.schema(&session.schema)?.graph;
+                return Ok(QueryResult {
+                    columns: vec!["name".into(), "label".into(), "property".into(), "entries".into()],
+                    rows: graph
+                        .indexes()
+                        .into_iter()
+                        .map(|i| {
+                            vec![
+                                Value::from(i.name),
+                                Value::from(i.label),
+                                Value::from(i.key),
+                                Value::Integer(i.entries as i64),
+                            ]
+                        })
+                        .collect(),
+                    stats: QueryStats::default(),
+                });
+            }
             AdminCommand::CreateDatabase { name, if_not_exists } => {
                 if !(*if_not_exists && self.catalog.database(name).is_ok()) {
                     self.apply_logged(Op::CreateDatabase { name: name.clone() })?;

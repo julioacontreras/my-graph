@@ -1,12 +1,13 @@
 //! Value encoding used in payloads.
 //!
 //! The scalar, list and map tags match the storage codec
-//! (`mygraph-storage/src/codec.rs`). NODE and RELATIONSHIP exist only on the
-//! wire, because they only appear in query results. Integers are
+//! (`mygraph-storage/src/codec.rs`). NODE, RELATIONSHIP and PATH exist only on
+//! the wire, because they only appear in query results. A PATH is a count and
+//! that many NODE values, then a count and that many RELATIONSHIP values. Integers are
 //! little-endian; strings, byte arrays, lists and maps are prefixed with a u32
 //! length or count.
 
-use mygraph_core::{MyGraphError, NodeValue, PropertyMap, RelationshipValue, Result, Value};
+use mygraph_core::{MyGraphError, NodeValue, PathValue, PropertyMap, RelationshipValue, Result, Value};
 
 /// Maximum nesting of lists and maps accepted by the decoder.
 pub const MAX_DEPTH: usize = 64;
@@ -22,6 +23,7 @@ pub mod tag {
     pub const MAP: u8 = 7;
     pub const NODE: u8 = 8;
     pub const RELATIONSHIP: u8 = 9;
+    pub const PATH: u8 = 10;
 }
 
 fn protocol_error(msg: impl Into<String>) -> MyGraphError {
@@ -79,6 +81,17 @@ pub fn encode_value(buf: &mut Vec<u8>, v: &Value) -> Result<()> {
             buf.extend_from_slice(&r.end_node.to_le_bytes());
             encode_bytes(buf, r.rel_type.as_bytes())?;
             encode_map(buf, &r.properties)?;
+        }
+        Value::Path(p) => {
+            buf.push(tag::PATH);
+            encode_len(buf, p.nodes.len())?;
+            for n in &p.nodes {
+                encode_value(buf, &Value::Node(Box::new(n.clone())))?;
+            }
+            encode_len(buf, p.relationships.len())?;
+            for r in &p.relationships {
+                encode_value(buf, &Value::Relationship(Box::new(r.clone())))?;
+            }
         }
     }
     Ok(())
@@ -196,6 +209,26 @@ impl<'a> Decoder<'a> {
                 rel_type: self.str()?,
                 properties: self.map_at(depth + 1)?,
             })),
+            tag::PATH => {
+                let mut nodes = Vec::new();
+                for _ in 0..self.count()? {
+                    match self.value_at(depth + 1)? {
+                        Value::Node(n) => nodes.push(*n),
+                        _ => return Err(protocol_error("a path must contain nodes")),
+                    }
+                }
+                let mut relationships = Vec::new();
+                for _ in 0..self.count()? {
+                    match self.value_at(depth + 1)? {
+                        Value::Relationship(r) => relationships.push(*r),
+                        _ => return Err(protocol_error("a path must contain relationships")),
+                    }
+                }
+                if nodes.len() != relationships.len() + 1 {
+                    return Err(protocol_error("a path needs one more node than relationships"));
+                }
+                Value::Path(Box::new(PathValue { nodes, relationships }))
+            }
             t => return Err(protocol_error(format!("unknown value tag {t}"))),
         })
     }
@@ -260,6 +293,16 @@ mod tests {
         }));
         assert_eq!(roundtrip(&n), n);
         assert_eq!(roundtrip(&r), r);
+
+        let (Value::Node(a), Value::Relationship(rel)) = (n, r) else { unreachable!() };
+        let mut b = a.clone();
+        b.id = 8;
+        let path = Value::Path(Box::new(PathValue { nodes: vec![*a, *b], relationships: vec![*rel] }));
+        assert_eq!(roundtrip(&path), path);
+        let empty = Value::Path(Box::new(PathValue { nodes: vec![], relationships: vec![] }));
+        let mut buf = Vec::new();
+        encode_value(&mut buf, &empty).unwrap();
+        assert!(Decoder::new(&buf).value().is_err(), "a path needs at least one node");
     }
 
     #[test]

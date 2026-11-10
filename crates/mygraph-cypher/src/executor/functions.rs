@@ -76,7 +76,7 @@ pub(crate) fn call(env: &Env<'_>, name: &str, args: Vec<Val>) -> Result<Val> {
             "id" | "labels" | "type" | "keys" | "properties" | "size" | "length" | "tolower" | "toupper" | "trim"
             | "ltrim" | "rtrim" | "tostring" | "tointeger" | "tofloat" | "toboolean" | "abs" | "ceil" | "floor"
             | "round" | "sqrt" | "sign" | "head" | "last" | "tail" | "reverse" | "replace" | "substring" | "split"
-            | "startnode" | "endnode" | "left" | "right" => Ok(Val::Null),
+            | "startnode" | "endnode" | "left" | "right" | "nodes" | "relationships" | "rels" => Ok(Val::Null),
             _ => Err(MyGraphError::Semantic(format!("unknown function `{name}`"))),
         };
     }
@@ -146,12 +146,24 @@ pub(crate) fn call(env: &Env<'_>, name: &str, args: Vec<Val>) -> Result<Val> {
                 Val::Map(props.into_iter().collect())
             }
         }
+        "nodes" | "relationships" | "rels" => {
+            one(&args)?;
+            match &args[0] {
+                Val::Path { nodes, .. } if n == "nodes" => Val::List(nodes.iter().map(|x| Val::Node(*x)).collect()),
+                Val::Path { rels, .. } => Val::List(rels.iter().map(|x| Val::Rel(*x)).collect()),
+                other => return Err(type_err(format!("{n}() expects a PATH, got {}", other.type_name()))),
+            }
+        }
         "size" | "length" => {
             one(&args)?;
             match &args[0] {
+                Val::Path { rels, .. } if n == "length" => Val::Int(rels.len() as i64),
                 Val::List(l) => Val::Int(l.len() as i64),
                 Val::Str(s) => Val::Int(s.chars().count() as i64),
-                other => return Err(type_err(format!("{n}() expects a LIST or STRING, got {}", other.type_name()))),
+                other => {
+                    let expected = if n == "length" { "a PATH, LIST or STRING" } else { "a LIST or STRING" };
+                    return Err(type_err(format!("{n}() expects {expected}, got {}", other.type_name())));
+                }
             }
         }
         "tolower" => {

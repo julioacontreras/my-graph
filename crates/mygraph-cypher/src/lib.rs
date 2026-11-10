@@ -12,6 +12,6 @@ pub mod lexer;
 pub mod parser;
 pub mod semantic;
 
-pub use ast::{AdminCommand, Query, Statement};
+pub use ast::{AdminCommand, IndexTarget, Query, Statement};
 pub use executor::{execute, ExecResult, QueryStats};
 pub use parser::parse;

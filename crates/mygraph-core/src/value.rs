@@ -7,8 +7,8 @@ pub type PropertyMap = BTreeMap<String, Value>;
 
 /// A MyGraph value.
 ///
-/// Every variant except `Node` and `Relationship` can be stored as a property.
-/// `Node` and `Relationship` only appear in query results.
+/// Every variant except `Node`, `Relationship` and `Path` can be stored as a
+/// property. Those three only appear in query results.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -21,6 +21,15 @@ pub enum Value {
     Map(BTreeMap<String, Value>),
     Node(Box<NodeValue>),
     Relationship(Box<RelationshipValue>),
+    Path(Box<PathValue>),
+}
+
+/// A path as returned in a query result: `nodes.len() == relationships.len() + 1`,
+/// and relationship `i` connects nodes `i` and `i + 1` (in either direction).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathValue {
+    pub nodes: Vec<NodeValue>,
+    pub relationships: Vec<RelationshipValue>,
 }
 
 /// A node as returned in a query result.
@@ -49,7 +58,7 @@ impl Value {
     /// Whether the value may be stored as a property.
     pub fn is_storable(&self) -> bool {
         match self {
-            Value::Node(_) | Value::Relationship(_) => false,
+            Value::Node(_) | Value::Relationship(_) | Value::Path(_) => false,
             Value::List(items) => items.iter().all(Value::is_storable),
             Value::Map(map) => map.values().all(Value::is_storable),
             _ => true,
@@ -68,6 +77,7 @@ impl Value {
             Value::Map(_) => "MAP",
             Value::Node(_) => "NODE",
             Value::Relationship(_) => "RELATIONSHIP",
+            Value::Path(_) => "PATH",
         }
     }
 
@@ -110,6 +120,13 @@ impl Value {
     pub fn as_relationship(&self) -> Option<&RelationshipValue> {
         match self {
             Value::Relationship(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    pub fn as_path(&self) -> Option<&PathValue> {
+        match self {
+            Value::Path(p) => Some(p),
             _ => None,
         }
     }
@@ -245,29 +262,47 @@ impl fmt::Display for Value {
                 f.write_str("]")
             }
             Value::Map(map) => write_map(f, map),
-            Value::Node(n) => {
-                f.write_str("(")?;
-                for l in &n.labels {
-                    write!(f, ":{}", format_identifier(l))?;
-                }
-                if !n.properties.is_empty() {
-                    if !n.labels.is_empty() {
-                        f.write_str(" ")?;
+            Value::Node(n) => write_node(f, n),
+            Value::Relationship(r) => write_rel(f, r),
+            Value::Path(p) => {
+                let Some(first) = p.nodes.first() else { return Ok(()) };
+                write_node(f, first)?;
+                for (i, r) in p.relationships.iter().enumerate() {
+                    let forward = r.start_node == p.nodes[i].id;
+                    f.write_str(if forward { "-" } else { "<-" })?;
+                    write_rel(f, r)?;
+                    f.write_str(if forward { "->" } else { "-" })?;
+                    if let Some(n) = p.nodes.get(i + 1) {
+                        write_node(f, n)?;
                     }
-                    write_map(f, &n.properties)?;
                 }
-                f.write_str(")")
-            }
-            Value::Relationship(r) => {
-                write!(f, "[:{}", format_identifier(&r.rel_type))?;
-                if !r.properties.is_empty() {
-                    f.write_str(" ")?;
-                    write_map(f, &r.properties)?;
-                }
-                f.write_str("]")
+                Ok(())
             }
         }
     }
+}
+
+fn write_node(f: &mut fmt::Formatter<'_>, n: &NodeValue) -> fmt::Result {
+    f.write_str("(")?;
+    for l in &n.labels {
+        write!(f, ":{}", format_identifier(l))?;
+    }
+    if !n.properties.is_empty() {
+        if !n.labels.is_empty() {
+            f.write_str(" ")?;
+        }
+        write_map(f, &n.properties)?;
+    }
+    f.write_str(")")
+}
+
+fn write_rel(f: &mut fmt::Formatter<'_>, r: &RelationshipValue) -> fmt::Result {
+    write!(f, "[:{}", format_identifier(&r.rel_type))?;
+    if !r.properties.is_empty() {
+        f.write_str(" ")?;
+        write_map(f, &r.properties)?;
+    }
+    f.write_str("]")
 }
 
 #[cfg(test)]

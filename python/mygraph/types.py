@@ -35,6 +35,26 @@ class Relationship:
 
 
 @dataclass(frozen=True)
+class Path:
+    """A path: ``nodes[i]`` and ``nodes[i + 1]`` are joined by ``relationships[i]``."""
+
+    nodes: list[Node] = field(default_factory=list)
+    relationships: list[Relationship] = field(default_factory=list)
+
+    def __len__(self) -> int:
+        """The path length, in relationships (as Cypher's ``length(p)``)."""
+        return len(self.relationships)
+
+    @property
+    def start(self) -> Node:
+        return self.nodes[0]
+
+    @property
+    def end(self) -> Node:
+        return self.nodes[-1]
+
+
+@dataclass(frozen=True)
 class Stats:
     """Update counters of a statement."""
 

@@ -1,19 +1,21 @@
 //! Clause-by-clause query executor.
 //!
-//! v0.1 executes clauses in order over a materialized row set. Pattern
-//! matching starts from the first node of each path, using the label index
-//! when a label is given. A cost-based planner arrives in a later phase.
+//! Clauses run in order over a materialized row set. MATCH is planned by
+//! [`matcher::Matcher`]: it anchors each path on its most selective node
+//! (bound variable, `id()`, property index, smallest label) and applies
+//! `WHERE` conjuncts as soon as their variables are bound.
 
 mod eval;
 mod functions;
+mod matcher;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::AddAssign;
 
-use mygraph_core::{Graph, MyGraphError, NodeId, PropertyMap, RelId, Result, Value, WriteContext};
+use mygraph_core::{Graph, MyGraphError, NodeId, PropertyMap, Result, Value, WriteContext};
 
 use crate::ast::*;
-use eval::{arithmetic, equals, group_key, order_cmp, type_err, Env, Row, Val};
+use eval::{arithmetic, group_key, order_cmp, type_err, Env, Row, Val};
 
 /// Counters describing what a query changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -179,15 +181,12 @@ impl Executor<'_> {
         patterns: &[PathPattern],
         filter: Option<&Expr>,
     ) -> Result<Vec<Row>> {
+        let Some(sample) = rows.first() else { return Ok(rows) };
         let env = self.env(graph);
+        let matcher = matcher::Matcher::new(&env, patterns, filter, sample);
         let mut out = Vec::new();
         for row in rows {
-            let mut matches = Vec::new();
-            let mut used = Vec::new();
-            match_patterns(&env, patterns, 0, row.clone(), &mut used, &mut matches)?;
-            if let Some(f) = filter {
-                matches = filter_rows(&env, matches, f)?;
-            }
+            let matches = matcher.run(row.clone())?;
             if matches.is_empty() && optional {
                 let mut r = row;
                 for p in patterns {
@@ -539,152 +538,6 @@ impl Executor<'_> {
         let limit = count(&p.limit, "LIMIT")?.unwrap_or(usize::MAX);
         Ok((columns, produced.into_iter().skip(skip).take(limit).map(|(pr, _)| pr).collect()))
     }
-}
-
-// ---- pattern matching ----
-
-fn match_patterns(
-    env: &Env<'_>,
-    pats: &[PathPattern],
-    pi: usize,
-    row: Row,
-    used: &mut Vec<RelId>,
-    out: &mut Vec<Row>,
-) -> Result<()> {
-    if pi == pats.len() {
-        out.push(row);
-        return Ok(());
-    }
-    let p = &pats[pi];
-    for nid in start_candidates(env, &p.start, &row)? {
-        if !node_matches(env, &p.start, nid, &row)? {
-            continue;
-        }
-        let mut r = row.clone();
-        bind(&mut r, &p.start.variable, Val::Node(nid));
-        expand(env, pats, pi, 0, nid, r, used, out)?;
-    }
-    Ok(())
-}
-
-fn start_candidates(env: &Env<'_>, np: &NodePattern, row: &Row) -> Result<Vec<NodeId>> {
-    if let Some(v) = &np.variable {
-        if let Some(bound) = row.get(v) {
-            return match bound {
-                Val::Node(id) => Ok(vec![*id]),
-                Val::Null => Ok(vec![]),
-                other => Err(type_err(format!("variable `{v}` is a {}, expected a NODE", other.type_name()))),
-            };
-        }
-    }
-    Ok(match np.labels.first() {
-        Some(label) => env.graph.node_ids_with_label(label),
-        None => env.graph.nodes().map(|n| n.id).collect(),
-    })
-}
-
-fn props_match(env: &Env<'_>, expr: &Expr, props: &PropertyMap, row: &Row) -> Result<bool> {
-    let Val::Map(expected) = env.eval(expr, row)? else {
-        return Err(type_err("pattern properties must be a MAP"));
-    };
-    for (k, v) in &expected {
-        match props.get(k) {
-            Some(actual) if equals(&Val::from_value(actual), v) == Some(true) => {}
-            _ => return Ok(false),
-        }
-    }
-    Ok(true)
-}
-
-fn node_matches(env: &Env<'_>, np: &NodePattern, nid: NodeId, row: &Row) -> Result<bool> {
-    let Some(node) = env.graph.node(nid) else { return Ok(false) };
-    if !np.labels.iter().all(|l| env.graph.node_has_label(node, l)) {
-        return Ok(false);
-    }
-    match &np.properties {
-        Some(p) => props_match(env, p, &node.properties, row),
-        None => Ok(true),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn expand(
-    env: &Env<'_>,
-    pats: &[PathPattern],
-    pi: usize,
-    step: usize,
-    cur: NodeId,
-    row: Row,
-    used: &mut Vec<RelId>,
-    out: &mut Vec<Row>,
-) -> Result<()> {
-    let p = &pats[pi];
-    if step == p.steps.len() {
-        return match_patterns(env, pats, pi + 1, row, used, out);
-    }
-    let (rp, np) = &p.steps[step];
-    let Some(node) = env.graph.node(cur) else { return Ok(()) };
-    let type_ids: Vec<u32> = rp.types.iter().filter_map(|t| env.graph.rel_type_id(t)).collect();
-    if !rp.types.is_empty() && type_ids.is_empty() {
-        return Ok(());
-    }
-    let mut candidates: Vec<(RelId, NodeId)> = Vec::new();
-    if matches!(rp.direction, Direction::Outgoing | Direction::Both) {
-        for &rid in node.outgoing() {
-            if let Some(r) = env.graph.relationship(rid) {
-                candidates.push((rid, r.end_node));
-            }
-        }
-    }
-    if matches!(rp.direction, Direction::Incoming | Direction::Both) {
-        for &rid in node.incoming() {
-            if let Some(r) = env.graph.relationship(rid) {
-                // A self-loop is already listed among the outgoing relationships.
-                if rp.direction == Direction::Both && r.start_node == r.end_node {
-                    continue;
-                }
-                candidates.push((rid, r.start_node));
-            }
-        }
-    }
-    let bound_rel = rp.variable.as_ref().and_then(|v| row.get(v));
-    let bound_node = np.variable.as_ref().and_then(|v| row.get(v));
-    for (rid, other) in candidates {
-        if used.contains(&rid) {
-            continue;
-        }
-        let rel = env.graph.relationship(rid).expect("adjacency is consistent");
-        if !type_ids.is_empty() && !type_ids.contains(&rel.rel_type) {
-            continue;
-        }
-        match bound_rel {
-            None => {}
-            Some(Val::Rel(b)) if *b == rid => {}
-            Some(Val::Rel(_) | Val::Null) => continue,
-            Some(v) => return Err(type_err(format!("expected a RELATIONSHIP, got {}", v.type_name()))),
-        }
-        match bound_node {
-            None => {}
-            Some(Val::Node(b)) if *b == other => {}
-            Some(Val::Node(_) | Val::Null) => continue,
-            Some(v) => return Err(type_err(format!("expected a NODE, got {}", v.type_name()))),
-        }
-        if let Some(pe) = &rp.properties {
-            if !props_match(env, pe, &rel.properties, &row)? {
-                continue;
-            }
-        }
-        if !node_matches(env, np, other, &row)? {
-            continue;
-        }
-        let mut r = row.clone();
-        bind(&mut r, &rp.variable, Val::Rel(rid));
-        bind(&mut r, &np.variable, Val::Node(other));
-        used.push(rid);
-        expand(env, pats, pi, step + 1, other, r, used, out)?;
-        used.pop();
-    }
-    Ok(())
 }
 
 // ---- aggregation ----

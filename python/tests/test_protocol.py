@@ -3,7 +3,7 @@
 import struct
 import unittest
 
-from mygraph import Node, ProtocolError, Relationship
+from mygraph import Node, Path, ProtocolError, Relationship
 from mygraph import _protocol as p
 
 
@@ -42,6 +42,21 @@ class CodecTest(unittest.TestCase):
         rel = (bytes([p.T_REL]) + struct.pack("<QQQ", 1, 7, 8) + struct.pack("<I", 5) + b"KNOWS"
                + struct.pack("<I", 0))
         self.assertEqual(p.Decoder(rel).value(), Relationship(1, 7, 8, "KNOWS", {}))
+
+    def test_decode_path(self):
+        def node(i):
+            return bytes([p.T_NODE]) + struct.pack("<Q", i) + struct.pack("<I", 0) + struct.pack("<I", 0)
+
+        rel = bytes([p.T_REL]) + struct.pack("<QQQ", 1, 7, 8) + struct.pack("<I", 1) + b"R" + struct.pack("<I", 0)
+        path = bytes([p.T_PATH]) + struct.pack("<I", 2) + node(7) + node(8) + struct.pack("<I", 1) + rel
+        value = p.Decoder(path).value()
+        self.assertEqual(value, Path([Node(7), Node(8)], [Relationship(1, 7, 8, "R", {})]))
+        self.assertEqual((len(value), value.start.id, value.end.id), (1, 7, 8))
+        bad = bytes([p.T_PATH]) + struct.pack("<I", 1) + node(7) + struct.pack("<I", 1) + rel
+        with self.assertRaises(ProtocolError):
+            p.Decoder(bad).value()
+        with self.assertRaises(TypeError):
+            p.encode_value(bytearray(), value)
 
     def test_rejects_unsendable_values(self):
         for bad in (2**63, object(), {1: "x"}, Node(1)):

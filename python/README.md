@@ -109,7 +109,9 @@ with mygraph.connect("localhost", 6660) as db:
 ```
 
 `Node` has `id`, `labels`, `properties` (and `node["key"]`). `Relationship`
-has `id`, `start_node`, `end_node`, `type`, `properties`.
+has `id`, `start_node`, `end_node`, `type`, `properties`. `Path` (from
+`RETURN p` of a named or shortest path) has `nodes`, `relationships`,
+`start`, `end`, and `len(path)` is its length in relationships.
 
 Helpers write labels, types and property keys as backtick-quoted
 identifiers, and always send values as parameters, so user input is never

@@ -11,6 +11,6 @@ pub mod value;
 
 pub use catalog::{Catalog, GraphDatabase, IdAllocator, Op, Schema, DEFAULT_DATABASE, DEFAULT_SCHEMA};
 pub use error::{MyGraphError, Result};
-pub use graph::{Change, Graph, LabelId, Node, NodeId, RelId, RelTypeId, Relationship, SchemaId};
+pub use graph::{Change, Graph, IndexInfo, IndexKey, LabelId, Node, NodeId, RelId, RelTypeId, Relationship, SchemaId};
 pub use transaction::{now_millis, Journal, WriteContext};
-pub use value::{format_identifier, NodeValue, PropertyMap, RelationshipValue, Value};
+pub use value::{format_identifier, NodeValue, PathValue, PropertyMap, RelationshipValue, Value};

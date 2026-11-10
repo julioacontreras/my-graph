@@ -50,9 +50,10 @@ for each entry the key (as a string, below) followed by a tagged value.
 | 7 | map | u32 count + (string key, value) pairs |
 | 8 | node | u64 id, u32 label count + strings, map of properties |
 | 9 | relationship | u64 id, u64 start node id, u64 end node id, string type, map of properties |
+| 10 | path | u32 count + node values (tag 8), u32 count + relationship values (tag 9); one more node than relationships, relationship `i` joins nodes `i` and `i + 1` in either direction |
 
-Tags 0–7 are the same as the storage codec. Nodes and relationships appear only
-in results, so clients must not send them. Lists and maps may nest up to 64
+Tags 0–7 are the same as the storage codec. Nodes, relationships and paths
+appear only in results, so clients must not send them. Lists and maps may nest up to 64
 levels deep.
 
 ## Messages

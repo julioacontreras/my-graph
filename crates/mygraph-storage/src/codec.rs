@@ -87,7 +87,7 @@ impl Encoder {
                 self.u8(tag::MAP);
                 self.properties(m)?;
             }
-            Value::Node(_) | Value::Relationship(_) => {
+            Value::Node(_) | Value::Relationship(_) | Value::Path(_) => {
                 return Err(MyGraphError::Storage(format!("{} values cannot be persisted", v.type_name())))
             }
         }
@@ -172,6 +172,17 @@ impl Encoder {
                 self.u64(*id);
                 self.str(label)?;
                 self.u64(*ts);
+            }
+            Change::CreateIndex { name, label, key } => {
+                self.u8(9);
+                self.str(name)?;
+                self.str(label)?;
+                self.str(key)?;
+            }
+            Change::DropIndex { label, key } => {
+                self.u8(10);
+                self.str(label)?;
+                self.str(key)?;
             }
         }
         Ok(())
@@ -332,6 +343,8 @@ impl<'a> Decoder<'a> {
             6 => Change::SetRelationshipProperty { id: self.u64()?, key: self.str()?, value: self.opt_value()? },
             7 => Change::AddLabel { id: self.u64()?, label: self.str()?, ts: self.u64()? },
             8 => Change::RemoveLabel { id: self.u64()?, label: self.str()?, ts: self.u64()? },
+            9 => Change::CreateIndex { name: self.str()?, label: self.str()?, key: self.str()? },
+            10 => Change::DropIndex { label: self.str()?, key: self.str()? },
             t => return Err(corrupt(format!("unknown change tag {t}"))),
         })
     }

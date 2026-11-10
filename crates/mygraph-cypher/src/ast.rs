@@ -15,14 +15,44 @@ pub enum Statement {
 /// MyGraph administrative extensions (not part of openCypher).
 #[derive(Debug, Clone, PartialEq)]
 pub enum AdminCommand {
-    CreateDatabase { name: String, if_not_exists: bool },
-    DropDatabase { name: String, if_exists: bool },
+    CreateDatabase {
+        name: String,
+        if_not_exists: bool,
+    },
+    DropDatabase {
+        name: String,
+        if_exists: bool,
+    },
     UseDatabase(String),
-    CreateSchema { name: String, if_not_exists: bool },
-    DropSchema { name: String, if_exists: bool },
+    CreateSchema {
+        name: String,
+        if_not_exists: bool,
+    },
+    DropSchema {
+        name: String,
+        if_exists: bool,
+    },
     UseSchema(String),
     ShowDatabases,
     ShowSchemas,
+    /// Equality index on `(label, key)` in the current schema.
+    CreateIndex {
+        name: Option<String>,
+        label: String,
+        key: String,
+        if_not_exists: bool,
+    },
+    DropIndex {
+        target: IndexTarget,
+        if_exists: bool,
+    },
+    ShowIndexes,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexTarget {
+    Name(String),
+    On { label: String, key: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -52,14 +82,26 @@ pub enum Clause {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathPattern {
+    /// `p = (a)-->(b)`: binds the matched path to `p`.
+    pub name: Option<String>,
+    pub shortest: Option<Shortest>,
     pub start: NodePattern,
     pub steps: Vec<(RelPattern, NodePattern)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shortest {
+    /// `shortestPath(...)`: one shortest path per pair of end nodes.
+    One,
+    /// `allShortestPaths(...)`: every path of the minimum length.
+    All,
 }
 
 impl PathPattern {
     /// Variables introduced by the pattern, in order of appearance.
     pub fn variables(&self) -> Vec<&str> {
-        let all = std::iter::once(&self.start.variable)
+        let all = std::iter::once(&self.name)
+            .chain(std::iter::once(&self.start.variable))
             .chain(self.steps.iter().flat_map(|(r, n)| [&r.variable, &n.variable]));
         let mut vars: Vec<&str> = Vec::new();
         for v in all.flatten() {
@@ -91,6 +133,16 @@ pub struct RelPattern {
     pub types: Vec<String>,
     pub properties: Option<Expr>,
     pub direction: Direction,
+    /// `*min..max` for variable-length relationships; the variable then binds
+    /// to a list of relationships.
+    pub length: Option<VarLength>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VarLength {
+    pub min: u32,
+    /// `None`: no upper bound (relationship uniqueness still ends the search).
+    pub max: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -22,6 +22,11 @@ pub(crate) enum Val {
     Map(BTreeMap<String, Val>),
     Node(NodeId),
     Rel(RelId),
+    /// `nodes.len() == rels.len() + 1`; rel `i` joins nodes `i` and `i + 1`.
+    Path {
+        nodes: Vec<NodeId>,
+        rels: Vec<RelId>,
+    },
 }
 
 pub(crate) type Row = HashMap<String, Val>;
@@ -43,6 +48,10 @@ impl Val {
             Value::Map(m) => Val::Map(m.iter().map(|(k, v)| (k.clone(), Val::from_value(v))).collect()),
             Value::Node(n) => Val::Node(n.id),
             Value::Relationship(r) => Val::Rel(r.id),
+            Value::Path(p) => Val::Path {
+                nodes: p.nodes.iter().map(|n| n.id).collect(),
+                rels: p.relationships.iter().map(|r| r.id).collect(),
+            },
         }
     }
 
@@ -57,8 +66,8 @@ impl Val {
             Val::Bytes(b) => Value::Bytes(b),
             Val::List(l) => Value::List(l.into_iter().map(Val::into_property).collect::<Result<_>>()?),
             Val::Map(m) => Value::Map(m.into_iter().map(|(k, v)| Ok((k, v.into_property()?))).collect::<Result<_>>()?),
-            Val::Node(_) | Val::Rel(_) => {
-                return Err(type_err("nodes and relationships cannot be stored as property values"))
+            Val::Node(_) | Val::Rel(_) | Val::Path { .. } => {
+                return Err(type_err("nodes, relationships and paths cannot be stored as property values"))
             }
         })
     }
@@ -73,6 +82,16 @@ impl Val {
                 g.relationship_value(*id)
                     .ok_or_else(|| MyGraphError::Execution(format!("relationship {id} has been deleted")))?,
             )),
+            Val::Path { nodes, rels } => {
+                let gone = || MyGraphError::Execution("a path element has been deleted".into());
+                Value::Path(Box::new(mygraph_core::PathValue {
+                    nodes: nodes.iter().map(|n| g.node_value(*n).ok_or_else(gone)).collect::<Result<_>>()?,
+                    relationships: rels
+                        .iter()
+                        .map(|r| g.relationship_value(*r).ok_or_else(gone))
+                        .collect::<Result<_>>()?,
+                }))
+            }
             Val::List(l) => Value::List(l.iter().map(|v| v.materialize(g)).collect::<Result<_>>()?),
             Val::Map(m) => {
                 Value::Map(m.iter().map(|(k, v)| Ok((k.clone(), v.materialize(g)?))).collect::<Result<_>>()?)
@@ -93,6 +112,7 @@ impl Val {
             Val::Map(_) => "MAP",
             Val::Node(_) => "NODE",
             Val::Rel(_) => "RELATIONSHIP",
+            Val::Path { .. } => "PATH",
         }
     }
 
@@ -205,6 +225,7 @@ fn order_rank(v: &Val) -> u8 {
         Val::Map(_) => 0,
         Val::Node(_) => 1,
         Val::Rel(_) => 2,
+        Val::Path { .. } => 8,
         Val::List(_) => 3,
         Val::Str(_) => 4,
         Val::Bool(_) => 5,
@@ -227,6 +248,7 @@ pub(crate) fn order_cmp(a: &Val, b: &Val) -> Ordering {
         (Val::Bool(x), Val::Bool(y)) => x.cmp(y),
         (Val::Bytes(x), Val::Bytes(y)) => x.cmp(y),
         (Val::Node(x), Val::Node(y)) | (Val::Rel(x), Val::Rel(y)) => x.cmp(y),
+        (Val::Path { nodes: a, rels: x }, Val::Path { nodes: b, rels: y }) => a.cmp(b).then_with(|| x.cmp(y)),
         (Val::List(x), Val::List(y)) => {
             for (p, q) in x.iter().zip(y) {
                 let c = order_cmp(p, q);

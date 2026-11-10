@@ -124,6 +124,85 @@ pub enum Change {
         label: String,
         ts: u64,
     },
+    /// Creates an equality index on `(label, key)` and fills it from existing nodes.
+    CreateIndex {
+        name: String,
+        label: String,
+        key: String,
+    },
+    DropIndex {
+        label: String,
+        key: String,
+    },
+}
+
+/// Hashable form of an indexable property value. Values that are equal under
+/// Cypher equality map to the same key (`1` and `1.0` included). Lists, maps,
+/// byte arrays and NaN are not indexed; lookups with them fall back to a scan.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IndexKey {
+    Bool(bool),
+    Int(i64),
+    Float(u64),
+    Str(String),
+}
+
+impl IndexKey {
+    pub fn from_value(v: &Value) -> Option<IndexKey> {
+        Some(match v {
+            Value::Boolean(b) => IndexKey::Bool(*b),
+            Value::Integer(i) => IndexKey::Int(*i),
+            Value::Float(f) => Self::from_float(*f)?,
+            Value::String(s) => IndexKey::Str(s.clone()),
+            _ => return None,
+        })
+    }
+
+    pub fn from_float(f: f64) -> Option<IndexKey> {
+        if f.is_nan() {
+            return None;
+        }
+        // i64::MIN as f64 is exact; i64::MAX as f64 rounds up to 2^63, which is out of range
+        if f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64 {
+            return Some(IndexKey::Int(f as i64));
+        }
+        Some(IndexKey::Float(f.to_bits()))
+    }
+}
+
+/// An equality index over one `(label, property)` pair.
+#[derive(Debug, Clone, Default)]
+struct PropIndex {
+    name: String,
+    entries: HashMap<IndexKey, BTreeSet<NodeId>>,
+}
+
+impl PropIndex {
+    fn insert(&mut self, value: &Value, id: NodeId) {
+        if let Some(k) = IndexKey::from_value(value) {
+            self.entries.entry(k).or_default().insert(id);
+        }
+    }
+
+    fn remove(&mut self, value: &Value, id: NodeId) {
+        if let Some(k) = IndexKey::from_value(value) {
+            if let Some(set) = self.entries.get_mut(&k) {
+                set.remove(&id);
+                if set.is_empty() {
+                    self.entries.remove(&k);
+                }
+            }
+        }
+    }
+}
+
+/// Description of an index, as listed by `SHOW INDEXES`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexInfo {
+    pub name: String,
+    pub label: String,
+    pub key: String,
+    pub entries: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +213,8 @@ pub struct Graph {
     labels: Interner,
     rel_types: Interner,
     label_index: HashMap<LabelId, BTreeSet<NodeId>>,
+    /// Property indexes, grouped by label so node changes find theirs quickly.
+    prop_index: HashMap<LabelId, BTreeMap<String, PropIndex>>,
 }
 
 fn node_not_found(id: NodeId) -> MyGraphError {
@@ -184,6 +265,7 @@ impl Graph {
             labels: Interner::default(),
             rel_types: Interner::default(),
             label_index: HashMap::new(),
+            prop_index: HashMap::new(),
         }
     }
 
@@ -238,6 +320,77 @@ impl Graph {
             .and_then(|l| self.label_index.get(&l))
             .map(|set| set.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    /// Number of nodes carrying `label`.
+    pub fn label_count(&self, label: &str) -> usize {
+        self.labels.get(label).and_then(|l| self.label_index.get(&l)).map_or(0, BTreeSet::len)
+    }
+
+    pub fn has_index(&self, label: &str, key: &str) -> bool {
+        self.labels.get(label).and_then(|l| self.prop_index.get(&l)).is_some_and(|m| m.contains_key(key))
+    }
+
+    /// Ids of the nodes with `label` whose `key` equals `value`, in ascending
+    /// order. `None` when there is no such index or `value` is not indexable,
+    /// in which case the caller must scan.
+    pub fn nodes_by_property(&self, label: &str, key: &str, value: &Value) -> Option<Vec<NodeId>> {
+        let idx = self.labels.get(label).and_then(|l| self.prop_index.get(&l)).and_then(|m| m.get(key))?;
+        if value.is_null() {
+            return Some(Vec::new()); // `= null` never matches
+        }
+        // Integers and floats are compared as f64. Beyond 2^53 several integers
+        // share one f64, so the hashed key could miss a match: scan instead.
+        const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+        match value {
+            Value::Integer(i) if (*i as f64).abs() > EXACT => return None,
+            Value::Float(f) if f.abs() >= EXACT => return None,
+            _ => {}
+        }
+        let k = IndexKey::from_value(value)?;
+        Some(idx.entries.get(&k).map(|s| s.iter().copied().collect()).unwrap_or_default())
+    }
+
+    /// Every property index, ordered by label then key.
+    pub fn indexes(&self) -> Vec<IndexInfo> {
+        let mut out: Vec<IndexInfo> = self
+            .prop_index
+            .iter()
+            .flat_map(|(l, m)| {
+                m.iter().map(|(k, idx)| IndexInfo {
+                    name: idx.name.clone(),
+                    label: self.labels.name(*l).to_string(),
+                    key: k.clone(),
+                    entries: idx.entries.values().map(BTreeSet::len).sum(),
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.label, &a.key).cmp(&(&b.label, &b.key)));
+        out
+    }
+
+    /// The `(label, key)` of the index called `name`.
+    pub fn index_by_name(&self, name: &str) -> Option<(String, String)> {
+        self.indexes().into_iter().find(|i| i.name == name).map(|i| (i.label, i.key))
+    }
+
+    fn index_node(&mut self, label: LabelId, id: NodeId) {
+        let Some(indexes) = self.prop_index.get_mut(&label) else { return };
+        let Some(node) = self.nodes.get(&id) else { return };
+        for (key, idx) in indexes.iter_mut() {
+            if let Some(v) = node.properties.get(key) {
+                idx.insert(v, id);
+            }
+        }
+    }
+
+    fn unindex_node(&mut self, label: LabelId, id: NodeId, props: &PropertyMap) {
+        let Some(indexes) = self.prop_index.get_mut(&label) else { return };
+        for (key, idx) in indexes.iter_mut() {
+            if let Some(v) = props.get(key) {
+                idx.remove(v, id);
+            }
+        }
     }
 
     pub fn node_has_label(&self, node: &Node, label: &str) -> bool {
@@ -295,6 +448,9 @@ impl Graph {
                         incoming: Vec::new(),
                     },
                 );
+                for l in self.nodes[id].labels.clone() {
+                    self.index_node(l, *id);
+                }
                 Ok(Some(Change::DeleteNode { id: *id }))
             }
             Change::DeleteNode { id } => {
@@ -309,6 +465,7 @@ impl Graph {
                     if let Some(set) = self.label_index.get_mut(l) {
                         set.remove(id);
                     }
+                    self.unindex_node(*l, *id, &node.properties);
                 }
                 Ok(Some(Change::CreateNode {
                     id: *id,
@@ -364,11 +521,21 @@ impl Graph {
             Change::SetNodeProperty { id, key, value, ts } => {
                 let value = normalize_value(key, value)?;
                 let node = self.nodes.get_mut(id).ok_or_else(|| node_not_found(*id))?;
-                let old = match value {
-                    Some(v) => node.properties.insert(key.clone(), v),
+                let old = match &value {
+                    Some(v) => node.properties.insert(key.clone(), v.clone()),
                     None => node.properties.remove(key),
                 };
                 let old_ts = std::mem::replace(&mut node.updated_at, *ts);
+                for l in &node.labels {
+                    if let Some(idx) = self.prop_index.get_mut(l).and_then(|m| m.get_mut(key)) {
+                        if let Some(o) = &old {
+                            idx.remove(o, *id);
+                        }
+                        if let Some(v) = &value {
+                            idx.insert(v, *id);
+                        }
+                    }
+                }
                 Ok(Some(Change::SetNodeProperty { id: *id, key: key.clone(), value: old, ts: old_ts }))
             }
             Change::SetRelationshipProperty { id, key, value } => {
@@ -389,6 +556,7 @@ impl Graph {
                 node.labels.push(lid);
                 let old_ts = std::mem::replace(&mut node.updated_at, *ts);
                 self.label_index.entry(lid).or_default().insert(*id);
+                self.index_node(lid, *id);
                 Ok(Some(Change::RemoveLabel { id: *id, label: label.clone(), ts: old_ts }))
             }
             Change::RemoveLabel { id, label, ts } => {
@@ -402,7 +570,33 @@ impl Graph {
                 if let Some(set) = self.label_index.get_mut(&lid) {
                     set.remove(id);
                 }
+                let props = std::mem::take(&mut self.nodes.get_mut(id).expect("checked").properties);
+                self.unindex_node(lid, *id, &props);
+                self.nodes.get_mut(id).expect("checked").properties = props;
                 Ok(Some(Change::AddLabel { id: *id, label: label.clone(), ts: old_ts }))
+            }
+            Change::CreateIndex { name, label, key } => {
+                if self.has_index(label, key) {
+                    return Err(MyGraphError::AlreadyExists(format!("index on :{label}({key})")));
+                }
+                if self.index_by_name(name).is_some() {
+                    return Err(MyGraphError::AlreadyExists(format!("index `{name}`")));
+                }
+                let lid = self.labels.intern(label);
+                let mut idx = PropIndex { name: name.clone(), entries: HashMap::new() };
+                for nid in self.label_index.get(&lid).into_iter().flatten() {
+                    if let Some(v) = self.nodes.get(nid).and_then(|n| n.properties.get(key)) {
+                        idx.insert(v, *nid);
+                    }
+                }
+                self.prop_index.entry(lid).or_default().insert(key.clone(), idx);
+                Ok(Some(Change::DropIndex { label: label.clone(), key: key.clone() }))
+            }
+            Change::DropIndex { label, key } => {
+                let removed =
+                    self.labels.get(label).and_then(|l| self.prop_index.get_mut(&l)).and_then(|m| m.remove(key));
+                let idx = removed.ok_or_else(|| MyGraphError::NotFound(format!("index on :{label}({key})")))?;
+                Ok(Some(Change::CreateIndex { name: idx.name, label: label.clone(), key: key.clone() }))
             }
         }
     }
@@ -446,6 +640,28 @@ mod tests {
         assert_eq!(g.node_count(), 0);
         assert_eq!(g.relationship_count(), 0);
         assert!(g.node_ids_with_label("User").is_empty());
+    }
+
+    #[test]
+    fn index_changes_are_invertible() {
+        let mut g = Graph::new(0);
+        g.apply(&create_node(1, "User")).unwrap();
+        let create = Change::CreateIndex { name: "i".into(), label: "User".into(), key: "name".into() };
+        let inv = g.apply(&create).unwrap().unwrap();
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from("x")), Some(vec![1]));
+        assert!(g.apply(&create).is_err(), "duplicate index");
+        g.apply(&create_node(2, "User")).unwrap();
+        g.apply(&Change::SetNodeProperty { id: 1, key: "name".into(), value: Some(1.0.into()), ts: 2 }).unwrap();
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from("x")), Some(vec![2]));
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from(1)), Some(vec![1]));
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from(vec![1])), None, "lists are not indexed");
+        assert_eq!(g.nodes_by_property("User", "name", &Value::Integer(1 << 60)), None, "beyond 2^53: scan");
+
+        let recreate = g.apply(&inv).unwrap().unwrap();
+        assert!(!g.has_index("User", "name"));
+        assert_eq!(recreate, create);
+        g.apply(&recreate).unwrap();
+        assert_eq!(g.indexes()[0].entries, 2);
     }
 
     #[test]

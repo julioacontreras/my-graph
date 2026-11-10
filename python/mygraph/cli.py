@@ -16,11 +16,11 @@ from typing import Any
 
 from .client import DEFAULT_PORT, connect
 from .errors import MyGraphError
-from .types import Node, Relationship
+from .types import Node, Path, Relationship
 
 
 def _plain(value: Any) -> Any:
-    if isinstance(value, (Node, Relationship)):
+    if isinstance(value, (Node, Relationship, Path)):
         return dataclasses.asdict(value)
     if isinstance(value, list):
         return [_plain(v) for v in value]
@@ -36,6 +36,10 @@ def _show(value: Any) -> str:
     if isinstance(value, Relationship):
         props = json.dumps(value.properties, ensure_ascii=False)
         return f"({value.start_node})-[{value.id}:{value.type} {props}]->({value.end_node})"
+    if isinstance(value, Path):
+        return " ".join(_show(x) for pair in zip(value.nodes, value.relationships) for x in pair) + (
+            f" {_show(value.end)}" if value.nodes else ""
+        )
     if isinstance(value, str):
         return value
     return json.dumps(_plain(value), ensure_ascii=False)
