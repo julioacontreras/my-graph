@@ -1,4 +1,4 @@
-//! MyGraph TCP server speaking protocol v1 (`docs/PROTOCOL.md`).
+//! MyGraph TCP server speaking protocol v1 (`PROTOCOL.md`).
 //!
 //! One OS thread per connection, all sharing one [`Database`]. Each
 //! connection has its own [`mygraph::Session`] (current database and schema)

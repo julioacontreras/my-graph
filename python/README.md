@@ -1,7 +1,7 @@
 # mygraph-client (Python)
 
 Python client for the MyGraph server. It talks to the server over TCP using
-MyGraph protocol v1 ([docs/PROTOCOL.md](https://github.com/julioacontreras/my-graph/blob/main/docs/PROTOCOL.md))
+MyGraph protocol v1 ([PROTOCOL.md](https://github.com/julioacontreras/my-graph/blob/main/PROTOCOL.md))
 and needs only the standard library (Python ≥ 3.10).
 
 ## Install

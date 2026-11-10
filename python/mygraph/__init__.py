@@ -7,7 +7,7 @@
         for user in db.find_nodes("User", {"name": "Alice"}):
             print(user.id, user.properties)
 
-The client speaks MyGraph protocol v1 (``docs/PROTOCOL.md``) over TCP and
+The client speaks MyGraph protocol v1 (``PROTOCOL.md``) over TCP and
 needs nothing outside the Python standard library.
 """
 

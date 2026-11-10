@@ -1,4 +1,4 @@
-"""MyGraph protocol v1: framing and value codec (see docs/PROTOCOL.md).
+"""MyGraph protocol v1: framing and value codec (see PROTOCOL.md).
 
 Frame header, little-endian: u8 version, u8 message type, u32 request id,
 u32 payload length. The payload is one encoded MAP (count + key/value pairs,

@@ -24,3 +24,6 @@ __pycache__/
 # Python build output
 python/dist/
 python/build/
+
+# Local docs
+/docs/

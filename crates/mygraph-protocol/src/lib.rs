@@ -1,4 +1,4 @@
-//! MyGraph wire protocol, version 1. See `docs/PROTOCOL.md`.
+//! MyGraph wire protocol, version 1. See `PROTOCOL.md`.
 //!
 //! A connection carries frames. Each frame has a fixed 10-byte header
 //! (version, message type, request id, payload length) followed by a payload.
