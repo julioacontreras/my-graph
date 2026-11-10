@@ -1,12 +1,15 @@
-//! `mygraph` command line (embedded mode).
+//! `mygraph` command line.
 //!
 //! ```text
-//! mygraph shell [--data DIR]                 interactive shell
-//! mygraph query [--data DIR] [--json] QUERY  run one script and print the result
+//! mygraph shell [--data DIR | --host HOST --port PORT]                 interactive shell
+//! mygraph query [--data DIR | --host HOST --port PORT] [--json] QUERY  run one script and print the result
 //! ```
 //!
-//! Without `--data` the instance is in-memory. Client/server mode
-//! (`mygraph connect`) arrives with the server in Phase 6.
+//! Without `--data` the embedded instance is in-memory. With `--host` and/or
+//! `--port` the CLI connects to a running `mygraph-server` instead
+//! (defaults: localhost, 6660).
+
+mod remote;
 
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
@@ -15,12 +18,19 @@ use std::time::Instant;
 use mygraph::{params, Database, QueryResult, Transaction, Value};
 
 const USAGE: &str = "usage:
-  mygraph shell [--data DIR]
-  mygraph query [--data DIR] [--json] \"<cypher>\"";
+  mygraph shell [--data DIR | --host HOST --port PORT]
+  mygraph query [--data DIR | --host HOST --port PORT] [--json] \"<cypher>\"
+
+  --host/--port connect to a running mygraph-server (defaults: localhost, 6660)";
+
+const DEFAULT_HOST: &str = "localhost";
+const DEFAULT_PORT: u16 = 6660;
 
 struct Args {
     command: String,
     data: Option<String>,
+    host: Option<String>,
+    port: Option<u16>,
     json: bool,
     rest: Vec<String>,
 }
@@ -28,14 +38,22 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let command = it.next().ok_or(USAGE)?;
-    let mut args = Args { command, data: None, json: false, rest: Vec::new() };
+    let mut args = Args { command, data: None, host: None, port: None, json: false, rest: Vec::new() };
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => args.data = Some(it.next().ok_or("--data needs a directory")?),
+            "--host" => args.host = Some(it.next().ok_or("--host needs a host name")?),
+            "--port" => {
+                let p = it.next().ok_or("--port needs a number")?;
+                args.port = Some(p.parse().map_err(|_| format!("invalid port `{p}`"))?);
+            }
             "--json" => args.json = true,
             "-h" | "--help" => return Err(USAGE.into()),
             _ => args.rest.push(a),
         }
+    }
+    if args.data.is_some() && (args.host.is_some() || args.port.is_some()) {
+        return Err("--data cannot be combined with --host/--port".into());
     }
     Ok(args)
 }
@@ -48,6 +66,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.host.is_some() || args.port.is_some() {
+        let host = args.host.clone().unwrap_or_else(|| DEFAULT_HOST.into());
+        return run_remote(&args, &host, args.port.unwrap_or(DEFAULT_PORT));
+    }
     let db = match &args.data {
         Some(dir) => Database::open(dir.as_str()),
         None => Database::in_memory(),
@@ -85,6 +107,92 @@ fn main() -> ExitCode {
             eprintln!("unknown command `{other}`\n{USAGE}");
             ExitCode::from(2)
         }
+    }
+}
+
+fn run_remote(args: &Args, host: &str, port: u16) -> ExitCode {
+    if args.command != "shell" && args.command != "query" {
+        eprintln!("unknown command `{}`\n{USAGE}", args.command);
+        return ExitCode::from(2);
+    }
+    let mut client = match remote::Client::connect(host, port) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let code = if args.command == "shell" {
+        remote_shell(&mut client, host, port);
+        ExitCode::SUCCESS
+    } else {
+        match client.query(&args.rest.join(" ")) {
+            Ok(reply) => {
+                if args.json {
+                    println!("{}", to_json(&reply.result));
+                } else {
+                    print!("{}", render_table(&reply.result));
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        }
+    };
+    client.close();
+    code
+}
+
+fn remote_shell(client: &mut remote::Client, host: &str, port: u16) {
+    println!("MyGraph v{} (connected to {host}:{port})", env!("CARGO_PKG_VERSION"));
+    println!("End statements with `;`. Type EXIT; to quit.");
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+    let mut location = String::from("?");
+    let mut in_tx = false;
+    if let Ok(r) = client.query("RETURN 1") {
+        location = format!("{}/{}", r.database, r.schema);
+    }
+    let mut buffer = String::new();
+    loop {
+        let prompt = match (in_tx, buffer.is_empty()) {
+            (_, false) => "      ...> ".to_string(),
+            (true, true) => format!("mygraph[{location}]*> "),
+            (false, true) => format!("mygraph[{location}]> "),
+        };
+        print!("{prompt}");
+        let _ = io::stdout().flush();
+        let Some(Ok(line)) = lines.next() else { break };
+        buffer.push_str(&line);
+        buffer.push('\n');
+        if !line.trim_end().ends_with(';') {
+            continue;
+        }
+        let stmt = std::mem::take(&mut buffer);
+        let cmd = stmt.trim().trim_end_matches(';').trim().to_ascii_uppercase();
+        if cmd == "EXIT" || cmd == "QUIT" {
+            break;
+        }
+        let started = Instant::now();
+        match client.query(&stmt) {
+            Ok(reply) => {
+                let r = &reply.result;
+                if r.columns.is_empty() && !r.stats.contains_updates() {
+                    println!("OK");
+                } else {
+                    print!("{}", render_table(r));
+                    println!("({:.1} ms)", started.elapsed().as_secs_f64() * 1000.0);
+                }
+                location = format!("{}/{}", reply.database, reply.schema);
+                in_tx = reply.in_transaction;
+            }
+            Err(e) => println!("error: {e}"),
+        }
+    }
+    if in_tx {
+        println!("open transaction rolled back by the server");
     }
 }
 
