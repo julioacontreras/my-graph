@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +8,27 @@ version = "0.1.0"
 description = "Python client for the MyGraph server (protocol v1)"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "See LICENSE in the repository root" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Julio Contreras" }]
+keywords = ["graph", "database", "client", "mygraph"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/julioacontreras/my-graph"
+Repository = "https://github.com/julioacontreras/my-graph"
+Issues = "https://github.com/julioacontreras/my-graph/issues"
+
+[project.scripts]
+mygraph-client = "mygraph.cli:main"
 
 [tool.setuptools]
 packages = ["mygraph"]
+package-data = { mygraph = ["py.typed"] }

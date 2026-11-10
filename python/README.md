@@ -1,13 +1,25 @@
 # mygraph-client (Python)
 
 Python client for the MyGraph server. It talks to the server over TCP using
-MyGraph protocol v1 ([docs/PROTOCOL.md](../docs/PROTOCOL.md)) and needs only
-the standard library (Python ≥ 3.10).
+MyGraph protocol v1 ([docs/PROTOCOL.md](https://github.com/julioacontreras/my-graph/blob/main/docs/PROTOCOL.md))
+and needs only the standard library (Python ≥ 3.10).
 
 ## Install
 
 ```bash
-pip install -e python/        # from the repository root
+pip install mygraph-client
+```
+
+The import name is `mygraph`:
+
+```python
+import mygraph
+```
+
+For development, from the repository root:
+
+```bash
+pip install -e python/
 ```
 
 ## Start a server
@@ -16,6 +28,40 @@ pip install -e python/        # from the repository root
 cargo run -p mygraph-server -- start                      # 127.0.0.1:6660, in memory
 cargo run -p mygraph-server -- start --port 6660 --data ./data
 ```
+
+## Command line client
+
+`pip install` also installs the `mygraph-client` command. With a server on
+port 6660 (for example `docker compose up -d`):
+
+```bash
+mygraph-client "MATCH (n) RETURN n;"
+```
+
+```text
+n
+(0:User {"age": 25, "name": "Alice"})
+(1:User {"name": "Bob"})
+```
+
+Without a query argument the script is read from stdin, so multi-line
+queries work too:
+
+```bash
+mygraph-client <<'CYPHER'
+MATCH (n)
+RETURN n;
+CYPHER
+```
+
+| Option | Default | |
+|---|---|---|
+| `--host HOST` | `localhost` | Server host |
+| `--port PORT` | `6660` | Server port |
+| `--json` | off | One JSON object per record |
+
+Without installing, `python3 -m mygraph` does the same. On error it prints
+the message to stderr and exits with status 1.
 
 ## Usage
 
