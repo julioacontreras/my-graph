@@ -1,0 +1,18 @@
+[package]
+name = "mygraph-server"
+description = "MyGraph TCP server (protocol v1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mygraph-server"
+path = "src/main.rs"
+
+[dependencies]
+mygraph.workspace = true
+mygraph-protocol.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

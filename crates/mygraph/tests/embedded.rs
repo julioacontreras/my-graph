@@ -238,3 +238,22 @@ fn syntax_errors_have_positions() {
     }
     assert!(matches!(db.execute("MATCH (n) RETURN m", params! {}), Err(MyGraphError::Semantic(_))));
 }
+
+#[test]
+fn sessions_have_independent_current_database() {
+    let db = Database::in_memory().unwrap();
+    db.execute("CREATE DATABASE other", params! {}).unwrap();
+    let mut a = db.session();
+    let mut b = db.session();
+    a.execute("USE DATABASE other", params! {}).unwrap();
+    a.execute("CREATE (:Only {x: 1})", params! {}).unwrap();
+    assert_eq!(a.current_database(), "other");
+    assert_eq!(b.current_database(), db.current_database());
+    let r = b.execute("MATCH (n:Only) RETURN count(n) AS c", params! {}).unwrap();
+    assert_eq!(r.value(0, "c"), Some(&mygraph::Value::Integer(0)));
+    let mut tx = a.begin_transaction().unwrap();
+    tx.execute("CREATE (:Only {x: 2})", params! {}).unwrap();
+    tx.commit().unwrap();
+    let r = a.execute("MATCH (n:Only) RETURN count(n) AS c", params! {}).unwrap();
+    assert_eq!(r.value(0, "c"), Some(&mygraph::Value::Integer(2)));
+}

@@ -1,0 +1,10 @@
+[package]
+name = "mygraph-protocol"
+description = "MyGraph wire protocol v1: framing, value codec and messages"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+mygraph-core.workspace = true

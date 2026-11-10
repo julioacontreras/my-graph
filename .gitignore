@@ -12,3 +12,11 @@
 *.swp
 *~
 .DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+/python/build/
+/python/dist/
