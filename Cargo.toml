@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mygraph-core",
+    "crates/mygraph-cypher",
+    "crates/mygraph-storage",
+    "crates/mygraph",
+    "crates/mygraph-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[workspace.dependencies]
+mygraph-core = { path = "crates/mygraph-core" }
+mygraph-cypher = { path = "crates/mygraph-cypher" }
+mygraph-storage = { path = "crates/mygraph-storage" }
+mygraph = { path = "crates/mygraph" }
+thiserror = "2"
+crc32fast = "1"
+tempfile = "3"
