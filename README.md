@@ -1,7 +1,7 @@
 # MyGraph
 
 Property-graph database written in Rust, queried with Cypher. The reference
-design is [MyGraph-Especificacion-Tecnica-v1.0.md](MyGraph-Especificacion-Tecnica-v1.0.md).
+design is [MyGraph-Especificacion-Tecnica-v1.0.md](docs/MyGraph-Especificacion-Tecnica-v1.0.md).
 
 ## Status: v0.1 (vertical slice, spec §21)
 

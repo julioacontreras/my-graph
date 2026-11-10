@@ -1,3 +1,14 @@
+# Rust build output
 /target
+**/*.rs.bk
+
+# Local MyGraph data directories
 /data
+/mygraph_data
+
+# Editors / OS
+.idea/
+.vscode/
 *.swp
+*~
+.DS_Store
