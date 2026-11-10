@@ -21,6 +21,7 @@ lookup key is indexed).
   `allShortestPaths`, with `length(p)`, `nodes(p)` and `relationships(p)`.
 - Path values in results: wire protocol tag 10, `mygraph.Path` in the
   Python client, a JSON shape in the CLI.
+- Python client `mygraph-client` 0.2.0 (PyPI, tag `py-v0.2.0`): reads paths.
 
 ### Upgrade notes
 

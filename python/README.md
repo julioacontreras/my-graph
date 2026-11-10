@@ -156,8 +156,9 @@ The workflow [`.github/workflows/pypi.yml`](../.github/workflows/pypi.yml)
 publishes the package when a tag that starts with `py-v` is pushed. It uses
 PyPI trusted publishing, so no API token or password is stored in GitHub.
 
-1. Increase `version` in [`pyproject.toml`](pyproject.toml), for example
-   `0.1.0` → `0.1.1`. PyPI does not accept a version number twice, even
+1. Increase `version` in [`pyproject.toml`](pyproject.toml) and
+   `__version__` in [`mygraph/_version.py`](mygraph/_version.py) (a test
+   checks that they are equal), for example `0.2.0` → `0.2.1`. PyPI does not accept a version number twice, even
    after you delete a release.
 2. Commit and push the change to `main`.
 3. Create and push a tag with the same version:

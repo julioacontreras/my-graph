@@ -22,10 +22,10 @@ from .errors import (
     QueryError,
     TransactionError,
 )
+from ._version import __version__
 from .transaction import Transaction
 from .types import Node, Path, Relationship, Result, Stats
 
-__version__ = "0.1.0"
 
 __all__ = [
     "AlreadyExistsError",

@@ -7,6 +7,7 @@ import threading
 from typing import Any, Mapping
 
 from . import _protocol as p
+from ._version import __version__
 from ._ops import CypherOps, quote
 from .errors import ConnectionClosedError, ProtocolError, TransactionError, error_from_payload
 from .transaction import Transaction
@@ -32,7 +33,7 @@ class Client(CypherOps):
         user: str | None = None,
         password: str | None = None,
         timeout: float | None = 30.0,
-        client_name: str = "mygraph-python/0.1.0",
+        client_name: str = f"mygraph-python/{__version__}",
     ):
         self.host, self.port = host, port
         self._lock = threading.Lock()

@@ -1,7 +1,9 @@
 """Codec and framing tests; no server needed."""
 
+import re
 import struct
 import unittest
+from pathlib import Path as FsPath
 
 from mygraph import Node, Path, ProtocolError, Relationship
 from mygraph import _protocol as p
@@ -73,6 +75,14 @@ class CodecTest(unittest.TestCase):
     def test_frame_header(self):
         frame = p.encode_frame(p.QUERY, 9, b"xyz")
         self.assertEqual(frame[:10], struct.pack("<BBII", 1, 0x10, 9, 3))
+
+
+class VersionTest(unittest.TestCase):
+    def test_package_version_matches_pyproject(self):
+        import mygraph
+
+        text = (FsPath(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+        self.assertEqual(re.search(r'^version = "([^"]+)"', text, re.M).group(1), mygraph.__version__)
 
 
 if __name__ == "__main__":
