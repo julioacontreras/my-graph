@@ -6,6 +6,8 @@ members = [
     "crates/mygraph-storage",
     "crates/mygraph",
     "crates/mygraph-cli",
+    "crates/mygraph-protocol",
+    "crates/mygraph-server",
 ]
 
 [workspace.package]
@@ -19,6 +21,7 @@ mygraph-core = { path = "crates/mygraph-core" }
 mygraph-cypher = { path = "crates/mygraph-cypher" }
 mygraph-storage = { path = "crates/mygraph-storage" }
 mygraph = { path = "crates/mygraph" }
+mygraph-protocol = { path = "crates/mygraph-protocol" }
 thiserror = "2"
 crc32fast = "1"
 tempfile = "3"

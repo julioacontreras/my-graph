@@ -45,17 +45,26 @@ macro_rules! params {
 /// An open MyGraph instance (all of its databases).
 pub struct Database {
     inner: Mutex<Inner>,
+    /// The session used by [`Database::execute`] and friends.
+    default_session: Mutex<SessionState>,
 }
 
-struct Session {
+/// The database and schema a session runs statements against.
+#[derive(Debug, Clone)]
+struct SessionState {
     database: String,
     schema: String,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        SessionState { database: DEFAULT_DATABASE.into(), schema: DEFAULT_SCHEMA.into() }
+    }
 }
 
 struct Inner {
     catalog: Catalog,
     store: Option<Store>,
-    session: Session,
     config: Config,
 }
 
@@ -76,8 +85,10 @@ impl Database {
     }
 
     fn from_parts(catalog: Catalog, store: Option<Store>, config: Config) -> Self {
-        let session = Session { database: DEFAULT_DATABASE.into(), schema: DEFAULT_SCHEMA.into() };
-        Database { inner: Mutex::new(Inner { catalog, store, session, config }) }
+        Database {
+            inner: Mutex::new(Inner { catalog, store, config }),
+            default_session: Mutex::new(SessionState::default()),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -86,16 +97,32 @@ impl Database {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn default_session(&self) -> MutexGuard<'_, SessionState> {
+        self.default_session.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Opens an independent session. Each session has its own current
+    /// database and schema, so `USE DATABASE` in one session does not affect
+    /// the others. The server opens one session per connection.
+    pub fn session(&self) -> Session<'_> {
+        Session { db: self, state: SessionState::default() }
+    }
+
     /// Executes a script of one or more `;`-separated statements. Each
     /// statement runs in its own transaction (auto-commit). The whole script is
     /// parsed before anything runs. Returns the last statement's rows, with
     /// stats summed over all statements.
     pub fn execute(&self, query: &str, params: Params) -> Result<QueryResult> {
+        let mut session = self.default_session();
+        self.execute_in_session(&mut session, query, &params)
+    }
+
+    fn execute_in_session(&self, session: &mut SessionState, query: &str, params: &Params) -> Result<QueryResult> {
         let statements = mygraph_cypher::parse(query)?;
         let mut inner = self.lock();
         let mut result = QueryResult::default();
         for stmt in &statements {
-            let r = inner.run_statement(stmt, &params)?;
+            let r = inner.run_statement(session, stmt, params)?;
             let stats = std::mem::take(&mut result.stats);
             result = r;
             result.stats += &stats;
@@ -106,8 +133,13 @@ impl Database {
     /// Starts an explicit transaction on the current database and schema.
     /// Dropping it without calling [`Transaction::commit`] rolls it back.
     pub fn begin_transaction(&self) -> Result<Transaction<'_>> {
+        let session = self.default_session().clone();
+        self.begin_in_session(&session)
+    }
+
+    fn begin_in_session(&self, session: &SessionState) -> Result<Transaction<'_>> {
         let inner = self.lock();
-        let (database, schema) = (inner.session.database.clone(), inner.session.schema.clone());
+        let (database, schema) = (session.database.clone(), session.schema.clone());
         inner.catalog.database(&database)?.schema(&schema)?;
         Ok(Transaction { inner, journal: Journal::default(), database, schema, finished: false })
     }
@@ -119,12 +151,12 @@ impl Database {
 
     /// The database that statements currently run against.
     pub fn current_database(&self) -> String {
-        self.lock().session.database.clone()
+        self.default_session().database.clone()
     }
 
     /// The schema that statements currently run against.
     pub fn current_schema(&self) -> String {
-        self.lock().session.schema.clone()
+        self.default_session().schema.clone()
     }
 
     /// What happened during recovery when the instance was opened.
@@ -145,11 +177,11 @@ fn empty_result() -> QueryResult {
 }
 
 impl Inner {
-    fn run_statement(&mut self, stmt: &Statement, params: &Params) -> Result<QueryResult> {
+    fn run_statement(&mut self, session: &mut SessionState, stmt: &Statement, params: &Params) -> Result<QueryResult> {
         match stmt {
-            Statement::Admin(cmd) => self.run_admin(cmd),
+            Statement::Admin(cmd) => self.run_admin(session, cmd),
             Statement::Query(q) => {
-                let (db, schema) = (self.session.database.clone(), self.session.schema.clone());
+                let (db, schema) = (session.database.clone(), session.schema.clone());
                 let mut journal = Journal::default();
                 match self.execute_in(&db, &schema, q, params, &mut journal) {
                     Ok(r) => {
@@ -230,8 +262,8 @@ impl Inner {
         self.maybe_checkpoint()
     }
 
-    fn run_admin(&mut self, cmd: &AdminCommand) -> Result<QueryResult> {
-        let current_db = self.session.database.clone();
+    fn run_admin(&mut self, session: &mut SessionState, cmd: &AdminCommand) -> Result<QueryResult> {
+        let current_db = session.database.clone();
         match cmd {
             AdminCommand::CreateDatabase { name, if_not_exists } => {
                 if !(*if_not_exists && self.catalog.database(name).is_ok()) {
@@ -242,7 +274,7 @@ impl Inner {
                 if !(*if_exists && self.catalog.database(name).is_err()) {
                     self.apply_logged(Op::DropDatabase { name: name.clone() })?;
                     if *name == current_db {
-                        self.session = Session { database: DEFAULT_DATABASE.into(), schema: DEFAULT_SCHEMA.into() };
+                        *session = SessionState::default();
                     }
                 }
             }
@@ -253,7 +285,7 @@ impl Inner {
                 } else {
                     db.schemas().next().map_or_else(|| DEFAULT_SCHEMA.to_string(), |s| s.name.clone())
                 };
-                self.session = Session { database: name.clone(), schema };
+                *session = SessionState { database: name.clone(), schema };
             }
             AdminCommand::CreateSchema { name, if_not_exists } => {
                 let exists = self.catalog.database(&current_db)?.schema(name).is_ok();
@@ -269,7 +301,7 @@ impl Inner {
             }
             AdminCommand::UseSchema(name) => {
                 self.catalog.database(&current_db)?.schema(name)?;
-                self.session.schema = name.clone();
+                session.schema = name.clone();
             }
             AdminCommand::ShowDatabases => {
                 return Ok(QueryResult {
@@ -299,7 +331,7 @@ impl Inner {
                                 Value::from(s.name.as_str()),
                                 Value::Integer(s.graph.node_count() as i64),
                                 Value::Integer(s.graph.relationship_count() as i64),
-                                Value::Boolean(s.name == self.session.schema),
+                                Value::Boolean(s.name == session.schema),
                             ]
                         })
                         .collect(),
@@ -308,6 +340,33 @@ impl Inner {
             }
         }
         Ok(empty_result())
+    }
+}
+
+/// An independent session on a [`Database`], with its own current database
+/// and schema. Created with [`Database::session`].
+pub struct Session<'db> {
+    db: &'db Database,
+    state: SessionState,
+}
+
+impl<'db> Session<'db> {
+    /// Executes a script in this session. Same semantics as [`Database::execute`].
+    pub fn execute(&mut self, query: &str, params: Params) -> Result<QueryResult> {
+        self.db.execute_in_session(&mut self.state, query, &params)
+    }
+
+    /// Starts an explicit transaction on this session's database and schema.
+    pub fn begin_transaction(&self) -> Result<Transaction<'db>> {
+        self.db.begin_in_session(&self.state)
+    }
+
+    pub fn current_database(&self) -> &str {
+        &self.state.database
+    }
+
+    pub fn current_schema(&self) -> &str {
+        &self.state.schema
     }
 }
 
