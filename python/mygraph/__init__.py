@@ -2,7 +2,7 @@
 
     from mygraph import connect
 
-    with connect("localhost", 7687) as db:
+    with connect("localhost", 6660) as db:
         alice = db.create_node("User", {"name": "Alice"})
         for user in db.find_nodes("User", {"name": "Alice"}):
             print(user.id, user.properties)

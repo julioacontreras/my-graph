@@ -1,0 +1,6 @@
+target
+.git
+.github
+python
+docs
+**/__pycache__

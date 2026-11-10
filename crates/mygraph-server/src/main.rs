@@ -11,7 +11,7 @@ use mygraph::Database;
 const USAGE: &str = "usage:
   mygraph-server start [--host HOST] [--port PORT] [--data DIR]
 
-defaults: --host 127.0.0.1 --port 7687, in-memory without --data";
+defaults: --host 127.0.0.1 --port 6660, in-memory without --data";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -19,7 +19,7 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
-    let (mut host, mut port, mut data) = ("127.0.0.1".to_string(), 7687u16, None::<String>);
+    let (mut host, mut port, mut data) = ("127.0.0.1".to_string(), 6660u16, None::<String>);
     while let Some(a) = args.next() {
         let value = match a.as_str() {
             "-h" | "--help" => {

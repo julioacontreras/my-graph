@@ -13,8 +13,8 @@ pip install -e python/        # from the repository root
 ## Start a server
 
 ```bash
-cargo run -p mygraph-server -- start                      # 127.0.0.1:7687, in memory
-cargo run -p mygraph-server -- start --port 7687 --data ./data
+cargo run -p mygraph-server -- start                      # 127.0.0.1:6660, in memory
+cargo run -p mygraph-server -- start --port 6660 --data ./data
 ```
 
 ## Usage
@@ -22,7 +22,7 @@ cargo run -p mygraph-server -- start --port 7687 --data ./data
 ```python
 import mygraph
 
-with mygraph.connect("localhost", 7687) as db:
+with mygraph.connect("localhost", 6660) as db:
     # Any Cypher, with parameters as a dict and/or keyword arguments
     r = db.run("MATCH (u:User) WHERE u.age > $min RETURN u.name AS name", min=18)
     for record in r:                # records are dicts
