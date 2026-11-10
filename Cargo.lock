@@ -94,6 +94,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mygraph-protocol"
+version = "0.1.0"
+dependencies = [
+ "mygraph-core",
+]
+
+[[package]]
+name = "mygraph-server"
+version = "0.1.0"
+dependencies = [
+ "mygraph",
+ "mygraph-protocol",
+ "tempfile",
+]
+
+[[package]]
 name = "mygraph-storage"
 version = "0.1.0"
 dependencies = [
