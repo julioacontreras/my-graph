@@ -59,7 +59,7 @@ Hoy `Database` tiene **una sola** sesión (database/schema) compartida, `Inner.s
 - Tests de ida y vuelta de cada mensaje y de los frames truncados o demasiado grandes.
 
 ### 2c. `crates/mygraph-server` (nuevo binario `mygraph-server`)
-- `mygraph-server start --host 127.0.0.1 --port 7687 [--data DIR]` (spec §9.1). Sin `--data` funciona en memoria.
+- `mygraph-server start --host 127.0.0.1 --port 6660 [--data DIR]` (spec §9.1). Sin `--data` funciona en memoria.
 - Usa `std::net::TcpListener` con un hilo por conexión y `Arc<Database>` compartido. Es una desviación consciente de la spec, que propone Tokio: en v0.1 las sentencias ya se ejecutan en serie, y Tokio puede llegar en la Fase 6. Se documenta en el README.
 - Cada conexión tiene su `Session` y, como mucho, una `Transaction` abierta que vive en la pila del hilo, igual que hace hoy `shell()` en `crates/mygraph-cli/src/main.rs`. Al desconectarse, la transacción abierta hace rollback (ya ocurre por `Drop`).
 - Limitación documentada: mientras una conexión tiene una transacción abierta, las demás se bloquean, porque la transacción guarda el mutex. Es el mismo comportamiento que en modo embebido.
@@ -88,7 +88,7 @@ python/
 ```python
 from mygraph import connect
 
-with connect("localhost", 7687) as db:
+with connect("localhost", 6660) as db:
     # Cypher genérico
     r = db.run("MATCH (u:User) WHERE u.age > $a RETURN u", {"a": 18})
     for rec in r.records(): print(rec["u"].properties)
@@ -125,6 +125,6 @@ with connect("localhost", 7687) as db:
 
 ## Verificación
 1. `cargo test --workspace`: los tests existentes siguen en verde (la API embebida no cambia), más los nuevos de protocol y server.
-2. `cargo run -p mygraph-server -- start --port 7687 --data /tmp/x` y luego `cd python && python3 -m pytest`: codec, CRUD completo, transacciones con commit/rollback, error de sintaxis con línea/columna, aislamiento de `USE DATABASE` entre dos conexiones, rollback al desconectarse.
+2. `cargo run -p mygraph-server -- start --port 6660 --data /tmp/x` y luego `cd python && python3 -m pytest`: codec, CRUD completo, transacciones con commit/rollback, error de sintaxis con línea/columna, aislamiento de `USE DATABASE` entre dos conexiones, rollback al desconectarse.
 3. Prueba manual: script de ejemplo `python/examples/crud.py` contra el servidor en marcha.
 4. Commit en una rama nueva (no en `main`), con `git pull --rebase` antes de commitear.

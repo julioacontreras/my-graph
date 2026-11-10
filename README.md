@@ -41,14 +41,14 @@ cargo run -p mygraph-cli -- query --json "MATCH (n) RETURN n LIMIT 10"
 cargo run -p mygraph --example embedded
 cargo test --workspace
 
-cargo run -p mygraph-server -- start --port 7687 --data ./data
+cargo run -p mygraph-server -- start --port 6660 --data ./data
 python3 python/examples/crud.py
 ```
 
 ```python
 import mygraph
 
-with mygraph.connect("localhost", 7687) as db:
+with mygraph.connect("localhost", 6660) as db:
     alice = db.create_node("User", {"name": "Alice"})
     db.find_nodes("User", {"name": "Alice"})
     db.update_node(alice.id, {"age": 26})

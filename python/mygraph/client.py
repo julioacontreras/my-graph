@@ -12,7 +12,7 @@ from .errors import ConnectionClosedError, ProtocolError, TransactionError, erro
 from .transaction import Transaction
 from .types import Result, Stats
 
-DEFAULT_PORT = 7687
+DEFAULT_PORT = 6660
 
 
 class Client(CypherOps):

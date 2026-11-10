@@ -6,7 +6,7 @@ transport does not depend on the Cypher grammar.
 
 ## Connection
 
-- TCP, default port **7687**.
+- TCP, default port **6660**.
 - Strict request/response: the client sends one frame and waits for its
   response before sending the next (no pipelining in v1).
 - The first message must be `HELLO`. Anything else gets `ERROR` and the

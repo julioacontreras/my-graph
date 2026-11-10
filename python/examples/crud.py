@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run from a check
 
 import mygraph
 
-with mygraph.connect("localhost", 7687) as db:
+with mygraph.connect("localhost", 6660) as db:
     print("connected to", db.server_info["server"], db.server_info["version"])
 
     # Create
