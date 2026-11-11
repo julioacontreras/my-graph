@@ -32,7 +32,7 @@ const PROPS = [
   },
   {
     title: "Light on memory.",
-    body: "Rust, no garbage collector, no heap to size. 230 MB with 100k relationships in our benchmark.",
+    body: "Rust, no garbage collector, no heap to size. 280 MB with 100k relationships in our benchmark.",
     href: "#benchmarks",
   },
   {

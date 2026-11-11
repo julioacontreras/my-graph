@@ -26,9 +26,9 @@ export function Benchmarks() {
         </p>
       }
     >
-      <Callout tone="warn" title={`Measured on MyGraph v${data.mygraphVersion}.`}>
-        v0.2 adds property indexes, a query planner and variable-length paths, which change load and traversal times.
-        v0.2 results coming soon.
+      <Callout title={`Measured on MyGraph v${data.mygraphVersion}.`}>
+        With property indexes and the query planner, the ×500 load went from 28.1 s (v0.1) to 5.5 s. The test queries
+        still use the v0.1 workarounds, so the traversals do not yet use the new variable-length paths.
       </Callout>
 
       <ul className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -58,9 +58,10 @@ export function Benchmarks() {
         <p className="mb-4 text-sm text-muted">Median of 10 warm runs, in ms. Bold = fastest.</p>
         <SearchTable />
         <p className="mt-3 text-xs leading-relaxed text-muted">
-          In v0.1, Q1, Q5, Q6, Q7 and Q12 walked the graph from the application, and Q8 and Q11 were split into several
-          queries, because variable-length paths and <code className="inline-code">shortestPath</code> did not exist yet.
-          v0.2 supports them.
+          For MyGraph, Q1, Q5, Q6, Q7 and Q12 still walk the graph from the application, and Q8 and Q11 are split into
+          several queries, as in v0.1. v0.2 supports variable-length paths and{" "}
+          <code className="inline-code">shortestPath</code>, but the test queries have not been rewritten yet. Property
+          indexes are created by hand, the same ones as in Neo4j.
         </p>
       </Sub>
 
@@ -68,7 +69,7 @@ export function Benchmarks() {
         <p className="mb-4 text-sm text-muted">In ms. Bold = fastest.</p>
         <UpdateTable />
         <p className="mt-3 text-xs leading-relaxed text-muted">
-          U3, U3b and U4 run once (single timing). “Crashed (OOM)”: the engine ran out of memory and restarted.
+          U3, U3b and U4 run once (single timing).
         </p>
       </Sub>
 
@@ -96,7 +97,7 @@ export function Benchmarks() {
             <li><strong className="text-fg">Tests:</strong> load in batches of 1,000; 13 searches; 7 updates (with their reverse where it applies).</li>
             <li><strong className="text-fg">Runs:</strong> each search once cold and 10 times warm; the median (p50) is reported.</li>
             <li><strong className="text-fg">Correctness:</strong> all five engines return the same number of rows in every test and scale.</li>
-            <li><strong className="text-fg">Environment:</strong> a laptop, Podman on macOS. Each engine measured alone (the others stopped), limited to 4 CPU and 6 GB, on a clean volume.</li>
+            <li><strong className="text-fg">Environment:</strong> a laptop, Podman on macOS. Each engine measured alone (the others stopped), limited to 4 CPU and 6 GB, on a clean volume. Neo4j and ArcadeDB memory set by hand (Neo4j 2 GB heap + 2 GB page cache; ArcadeDB 3 GB heap + 1 GB pages).</li>
             <li>
               <strong className="text-fg">Versions:</strong>{" "}
               {data.versions.map((v, i) => (
@@ -111,6 +112,7 @@ export function Benchmarks() {
               <li>One connection, no concurrency. High availability and failover were not measured.</li>
               <li>Synthetic data (a cloned base system), with the shape and volume of a real snapshot.</li>
               <li>Dgraph and ArcadeDB ran on a single node; distribution does not matter at this volume.</li>
+              <li>With all engines running at once, the 12 GB VM ran out of memory. That is why each engine is measured alone.</li>
             </ul>
             <p className="mt-4">The harness, dataset generator and raw results will be published in the repository. Harness coming soon.</p>
           </div>
