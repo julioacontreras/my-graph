@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-ssr/
+# Generated at build time by scripts/
+src/data/generated.ts
+src/data/snippets.generated.ts
+public/llms-full.txt
+public/docker-compose.yml

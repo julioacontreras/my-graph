@@ -1,48 +1,67 @@
-# MyGraph
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="branding/banner-dark.png">
+    <img alt="MyGraph — Graph Database. Open Source." src="branding/banner.png" width="520">
+  </picture>
+</p>
 
-Property-graph database written in Rust, queried with Cypher.
+<p align="center">
+  A property-graph database written in Rust, queried with Cypher.
+</p>
 
-If you only want to *use* the database (including AI agents), read
-[Quick reference](#quick-reference) first.
+<p align="center">
+  <a href="https://github.com/julioacontreras/my-graph/actions/workflows/docker.yml"><img alt="Docker image" src="https://github.com/julioacontreras/my-graph/actions/workflows/docker.yml/badge.svg"></a>
+  <a href="https://hub.docker.com/r/julioacontreras/mygraph"><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/julioacontreras/mygraph"></a>
+  <a href="https://pypi.org/project/mygraph-client/"><img alt="PyPI" src="https://img.shields.io/pypi/v/mygraph-client?label=mygraph-client"></a>
+  <a href="rust-toolchain.toml"><img alt="Rust 1.89+" src="https://img.shields.io/badge/rust-1.89%2B-orange"></a>
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
-## Status: v0.2
+<p align="center">
+  <a href="#installation"><strong>Installation</strong></a> ·
+  <a href="#usage"><strong>Usage</strong></a> ·
+  <a href="#reference"><strong>Reference</strong></a> ·
+  <a href="PROTOCOL.md"><strong>Protocol</strong></a> ·
+  <a href="python/README.md"><strong>Python client</strong></a> ·
+  <a href="CHANGELOG.md"><strong>Changelog</strong></a>
+</p>
 
-| Area | Implemented |
-|---|---|
-| Model | Directed property graph: nodes with multiple labels, typed relationships, properties (`null`, bool, int, float, string, bytes, list, map) |
-| Databases / schemas | Multiple databases with isolated schemas; `CREATE/DROP/USE DATABASE`, `CREATE/DROP/USE SCHEMA`, `SHOW DATABASES/SCHEMAS` |
-| Cypher | `MATCH`, `OPTIONAL MATCH`, `WHERE`, variable-length relationships (`-[:T*1..5]->`), named paths (`p = ...`), `shortestPath` / `allShortestPaths`, `CREATE`, `SET` (`=`, `+=`, labels), `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` (`DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`), `count/sum/avg/min/max/collect`, `CASE`, parameters, scalar functions; errors carry line/column |
-| Indexes and planning | Label index; property equality indexes (`CREATE INDEX FOR (n:L) ON (n.p)` or `CREATE INDEX ON :L(p)`, `DROP INDEX`, `SHOW INDEXES`), used by inline properties, `WHERE n.p = x` and `IN`; `id(n) = x` lookups; each path starts from its most selective node and `WHERE` is checked as soon as its variables are bound |
-| Transactions | Auto-commit per statement; explicit transactions with commit/rollback (rollback on drop); statement-level atomicity |
-| Storage | WAL (CRC32, fsync on commit) + snapshot checkpoints, crash recovery, torn-write detection, exclusive directory lock |
-| API | Embedded `Database::in_memory()` / `Database::open(path_or_config)`, `params!` |
-| CLI | `mygraph shell` / `mygraph query`, embedded or connected to a server |
-| Server | `mygraph-server start`: TCP, [protocol v1](PROTOCOL.md), one session per connection, explicit transactions |
-| Python client | [`python/`](python/README.md): `run(cypher)`, CRUD helpers for nodes/relationships, transactions; standard library only |
+---
 
-Not yet: `MERGE`, `UNION`, range or composite indexes, a cost-based
-planner, MVCC/concurrent writers, page-based storage, authentication
-(AUTH is accepted but not checked), TLS, import/export, security.
+MyGraph stores a directed property graph (labelled nodes, typed
+relationships, properties) with a write-ahead log and crash recovery. You
+can embed it in a Rust program or run it as a server and talk to it from
+the `mygraph` CLI, the Python client, or any client that speaks
+[protocol v1](PROTOCOL.md).
 
-## Quick reference
+> [!TIP]
+> **Using the database, or an AI agent?** Read [Installation](#installation),
+> [Usage](#usage) and [Reference](#reference). Everything there was checked
+> against v0.2. If a feature is not listed there or in [Status](#status),
+> assume it is not supported.
 
-Everything below was checked against v0.2. If a feature is not listed here
-or in the status table above, assume it is not supported.
+## Contents
 
-### Published packages
+- [Installation](#installation)
+- [Usage](#usage)
+- [Reference](#reference)
+- [Status](#status)
+- [Development](#development)
+- [Releasing](#releasing)
+- [Architecture](#architecture)
+- [License](#license)
+
+## Installation
 
 | What | Where | Install |
 |---|---|---|
 | Server (Docker image, amd64 + arm64) | Docker Hub [`julioacontreras/mygraph`](https://hub.docker.com/r/julioacontreras/mygraph), also `ghcr.io/julioacontreras/mygraph` | `docker pull julioacontreras/mygraph:latest` |
 | Python client + `mygraph-client` command | PyPI [`mygraph-client`](https://pypi.org/project/mygraph-client/) | `pip install mygraph-client` |
-| Python client from GitHub (no PyPI needed) | this repo, folder `python/` | `pip install "git+https://github.com/julioacontreras/my-graph.git#subdirectory=python"` |
-| Rust CLI `mygraph` | this repo | `cargo install --git https://github.com/julioacontreras/my-graph.git mygraph-cli` |
+| Rust CLI `mygraph` | this repository | `cargo install --git https://github.com/julioacontreras/my-graph.git mygraph-cli` |
 
-The image contains only the server. It has no shell and no CLI, so
-`docker compose exec` cannot run queries. Use one of the clients from
-your machine.
+### Server
 
-### 1. Start the server with Docker Compose
+#### [Docker Compose](https://docs.docker.com/compose/)
 
 From the repository root (the [`docker-compose.yml`](docker-compose.yml) is
 already there):
@@ -74,16 +93,65 @@ volumes:
   mygraph-data:
 ```
 
-Without Compose: `docker run -d -p 6660:6660 -v mygraph-data:/data julioacontreras/mygraph:latest`.
+#### Docker
 
-Without Docker: `cargo run -p mygraph-server -- start --port 6660 --data ./data`.
+```bash
+docker run -d -p 6660:6660 -v mygraph-data:/data julioacontreras/mygraph:latest
+```
+
+The image contains only the server. It has no shell and no CLI, so
+`docker compose exec` cannot run queries. Use one of the clients below from
+your machine.
+
+#### Building from source
+
+```bash
+cargo run -p mygraph-server -- start --port 6660 --data ./data
+```
+
 This listens on 127.0.0.1 only. Add `--host 0.0.0.0` to accept remote
 connections. Without `--data` all data is kept in memory and is lost when
 the server stops.
 
 No authentication is needed. `AUTH` is accepted but not checked.
 
-### 2. Connect with a CLI
+### Clients
+
+#### Python CLI and library
+
+```bash
+pip install mygraph-client
+```
+
+Without PyPI, install it from this repository:
+
+```bash
+pip install "git+https://github.com/julioacontreras/my-graph.git#subdirectory=python"
+```
+
+It uses the standard library only. See [python/README.md](python/README.md).
+
+#### Rust CLI
+
+```bash
+cargo install --git https://github.com/julioacontreras/my-graph.git mygraph-cli
+```
+
+Or, inside this repository: `cargo build --release -p mygraph-cli`, which
+builds `target/release/mygraph`.
+
+#### Rust library (embedded)
+
+The `mygraph` crate is not on crates.io yet. Add it as a git dependency:
+
+```toml
+[dependencies]
+mygraph = { git = "https://github.com/julioacontreras/my-graph.git" }
+```
+
+## Usage
+
+### Connect
 
 Both CLIs connect to `localhost:6660` by default. Use `--host` / `--port`
 for another address.
@@ -91,7 +159,6 @@ for another address.
 **Python CLI (`mygraph-client`):**
 
 ```bash
-pip install mygraph-client                       # or the GitHub install above
 mygraph-client "MATCH (n) RETURN n LIMIT 10;"    # one query, table output
 mygraph-client --json "MATCH (n) RETURN n;"      # one JSON object per line
 mygraph-client --host db.example.com --port 7000 "RETURN 1;"
@@ -106,9 +173,6 @@ Without installing it, `python3 -m mygraph` (from `python/`) does the same.
 **Rust CLI (`mygraph`):**
 
 ```bash
-cargo install --git https://github.com/julioacontreras/my-graph.git mygraph-cli
-# or, in this repo: cargo build --release -p mygraph-cli  → target/release/mygraph
-
 mygraph query --host localhost --json "MATCH (n) RETURN n LIMIT 10"   # one query
 mygraph shell --host localhost                                        # interactive shell
 ```
@@ -137,21 +201,20 @@ server: `--data DIR` stores data on disk, and without `--data` the data is
 kept in memory. Do not open a directory in embedded mode while a server is
 using it, because the directory is locked.
 
-**From code:** Python `mygraph.connect("localhost", 6660).run("...", param=value)`
-(see [python/README.md](python/README.md)). Rust embedded:
-`db.execute("...", params! {...})` (see [Usage](#usage)).
+> [!IMPORTANT]
+> For agents, `--json` is the format to parse. The CLIs **cannot pass
+> parameters** (`$name` fails with `missing parameter`), so put literal
+> values in the query, or use the Python or Rust library when the values
+> come from user input.
 
-For agents, `--json` is the format to parse. The CLIs **cannot pass
-parameters** (`$name` fails with `missing parameter`), so put literal values
-in the query, or use the Python or Rust library when the values come from
-user input.
+### Create data
 
-### 3. Result format
+```bash
+mygraph query --host localhost "CREATE INDEX FOR (u:User) ON (u.name)"
+mygraph query --host localhost "CREATE (a:User {name: 'Alice', age: 30})-[:KNOWS {since: 2020}]->(b:User {name: 'Bob', age: 25})"
+```
 
-`mygraph query --json` prints one JSON array with one object per row. The
-keys are the column names. A column without `AS` is named after its
-expression text, for example `n.name` or `count(n)`. Use `AS` to get
-predictable keys.
+### Query
 
 ```bash
 mygraph query --host localhost --json "MATCH (u:User)-[r:KNOWS]->(f) RETURN u, r, f.name AS friend"
@@ -162,6 +225,54 @@ mygraph query --host localhost --json "MATCH (u:User)-[r:KNOWS]->(f) RETURN u, r
   "r":{"id":0,"type":"KNOWS","start":0,"end":1,"properties":{"since":2020}},
   "friend":"Bob"}]
 ```
+
+### Use a database and a schema
+
+`USE` lasts only for the session, and each CLI call is a new session, so
+put it in the same script as the queries that need it:
+
+```bash
+mygraph query --host localhost "CREATE DATABASE shop"
+mygraph query --host localhost "USE DATABASE shop; MATCH (n) RETURN count(n) AS c"
+```
+
+### From code
+
+**Python** (see [python/README.md](python/README.md)):
+
+```python
+import mygraph
+
+with mygraph.connect("localhost", 6660) as db:
+    db.run("CREATE (u:User {name: $name})", name="Alice")
+    alice = db.create_node("User", {"name": "Carol"})
+    db.find_nodes("User", {"name": "Carol"})
+    db.update_node(alice.id, {"age": 26})
+    db.delete_node(alice.id)
+```
+
+**Rust, embedded:**
+
+```rust
+use mygraph::{params, Database};
+
+let db = Database::open("./mygraph_data")?;   // or Database::in_memory()
+db.execute("CREATE (a:User {name: $a})-[:KNOWS]->(b:User {name: $b})", params! { "a" => "Alice", "b" => "Bob" })?;
+let r = db.execute("MATCH (u:User)-[:KNOWS]->(f) RETURN u.name, f.name", params! {})?;
+
+let mut tx = db.begin_transaction()?;
+tx.execute("MATCH (u:User {name: 'Bob'}) SET u.age = 30", params! {})?;
+tx.commit()?;
+```
+
+## Reference
+
+### Result format
+
+`mygraph query --json` prints one JSON array with one object per row. The
+keys are the column names. A column without `AS` is named after its
+expression text, for example `n.name` or `count(n)`. Use `AS` to get
+predictable keys.
 
 - Node: `{"id", "labels", "properties"}`. Relationship: `{"id", "type", "start", "end", "properties"}`.
   Path: `{"nodes": [node, ...], "relationships": [relationship, ...]}`.
@@ -174,23 +285,22 @@ mygraph query --host localhost --json "MATCH (u:User)-[r:KNOWS]->(f) RETURN u, r
 `mygraph-client --json` (Python) prints one JSON object per line, one line
 per record.
 
-### 4. Sessions, databases and scripts
+### Sessions, databases and scripts
 
 - A new connection starts in database `default`, schema `public`.
 - `USE DATABASE` / `USE SCHEMA` last only for the session. **Each CLI call
   is a new session**, so put `USE` in the same script as the queries that
-  need it:
-  `mygraph query --host localhost "USE DATABASE shop; MATCH (n) RETURN count(n) AS c"`.
+  need it.
 - One query string can contain several statements separated by `;`. The
   output is the result of the last statement. Outside a transaction each
   statement is committed on its own.
 - Node and relationship ids are integers given by the engine. Use
   `id(n)` to match them: `MATCH (n) WHERE id(n) = 0 RETURN n`.
 - Property indexes are **not** created automatically. See
-  [Indexes](#6-indexes-you-create-them).
+  [Indexes](#indexes-you-create-them).
 - An open transaction blocks all other connections. Keep it short.
 
-### 5. Cypher examples
+### Cypher examples
 
 ```cypher
 // Create nodes and a relationship in one pattern
@@ -237,6 +347,8 @@ UNWIND [1, 2, 3] AS x RETURN x * 2 AS y
 CREATE DATABASE shop; SHOW DATABASES; USE DATABASE shop; CREATE SCHEMA s1; USE SCHEMA s1; SHOW SCHEMAS
 ```
 
+### Operators and functions
+
 **Operators:** `= <> < <= > >=`, `AND OR XOR NOT`, `+ - * / % ^`,
 `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL`,
 `CASE WHEN ... THEN ... ELSE ... END`. Comments are `//` and `/* */`.
@@ -255,12 +367,13 @@ Identifiers with spaces or reserved words go in backticks: `` `my label` ``.
 | Conversion | `toInteger`, `toFloat`, `toString`, `toBoolean`, `coalesce` |
 | Other | `length`, `timestamp` |
 
-**Not supported in v0.2:** `MERGE` and regular expressions (`=~`) fail with
-`syntax error ... not supported yet`. Constraints, composite indexes and
-`CALL` / procedures fail with an ordinary syntax error. To do an upsert, run `MATCH` first and `CREATE`
-only when it returns no rows.
+> [!WARNING]
+> **Not supported in v0.2:** `MERGE` and regular expressions (`=~`) fail
+> with `syntax error ... not supported yet`. Constraints, composite indexes
+> and `CALL` / procedures fail with an ordinary syntax error. To do an
+> upsert, run `MATCH` first and `CREATE` only when it returns no rows.
 
-### 6. Indexes: you create them
+### Indexes: you create them
 
 **What is automatic** (nothing to do):
 
@@ -308,38 +421,38 @@ are the same key). Lists and maps are not indexed. A lookup with one of them
 falls back to a scan, and so does a lookup with an integer beyond ±2^53.
 Results are the same with or without an index, only the speed changes.
 
-## Usage
+## Status
 
-```rust
-use mygraph::{params, Database};
+Current version: **v0.2**.
 
-let db = Database::open("./mygraph_data")?;
-db.execute("CREATE (a:User {name: $a})-[:KNOWS]->(b:User {name: $b})", params! { "a" => "Alice", "b" => "Bob" })?;
-let r = db.execute("MATCH (u:User)-[:KNOWS]->(f) RETURN u.name, f.name", params! {})?;
+| Area | Implemented |
+|---|---|
+| Model | Directed property graph: nodes with multiple labels, typed relationships, properties (`null`, bool, int, float, string, bytes, list, map) |
+| Databases / schemas | Multiple databases with isolated schemas; `CREATE/DROP/USE DATABASE`, `CREATE/DROP/USE SCHEMA`, `SHOW DATABASES/SCHEMAS` |
+| Cypher | `MATCH`, `OPTIONAL MATCH`, `WHERE`, variable-length relationships (`-[:T*1..5]->`), named paths (`p = ...`), `shortestPath` / `allShortestPaths`, `CREATE`, `SET` (`=`, `+=`, labels), `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` (`DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`), `count/sum/avg/min/max/collect`, `CASE`, parameters, scalar functions; errors carry line/column |
+| Indexes and planning | Label index; property equality indexes (`CREATE INDEX FOR (n:L) ON (n.p)` or `CREATE INDEX ON :L(p)`, `DROP INDEX`, `SHOW INDEXES`), used by inline properties, `WHERE n.p = x` and `IN`; `id(n) = x` lookups; each path starts from its most selective node and `WHERE` is checked as soon as its variables are bound |
+| Transactions | Auto-commit per statement; explicit transactions with commit/rollback (rollback on drop); statement-level atomicity |
+| Storage | WAL (CRC32, fsync on commit) + snapshot checkpoints, crash recovery, torn-write detection, exclusive directory lock |
+| API | Embedded `Database::in_memory()` / `Database::open(path_or_config)`, `params!` |
+| CLI | `mygraph shell` / `mygraph query`, embedded or connected to a server |
+| Server | `mygraph-server start`: TCP, [protocol v1](PROTOCOL.md), one session per connection, explicit transactions |
+| Python client | [`python/`](python/README.md): `run(cypher)`, CRUD helpers for nodes/relationships, transactions; standard library only |
 
-let mut tx = db.begin_transaction()?;
-tx.execute("MATCH (u:User {name: 'Bob'}) SET u.age = 30", params! {})?;
-tx.commit()?;
-```
+**Not yet:** `MERGE`, `UNION`, range or composite indexes, a cost-based
+planner, MVCC/concurrent writers, page-based storage, authentication
+(`AUTH` is accepted but not checked), TLS, import/export, security.
+
+## Development
 
 ```bash
-cargo run -p mygraph-cli -- shell --data ./data
-cargo run -p mygraph-cli -- query --host localhost --port 6660 --json "MATCH (n) RETURN n LIMIT 10"
-cargo run -p mygraph --example embedded
-cargo test --workspace
+cargo test --workspace                          # Rust tests
+(cd python && python3 -m unittest discover -s tests)   # Python tests
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets
 
+cargo run -p mygraph --example embedded         # embedded example
+cargo run -p mygraph-cli -- shell --data ./data # embedded shell on disk
 cargo run -p mygraph-server -- start --port 6660 --data ./data
-python3 python/examples/crud.py
-```
-
-```python
-import mygraph
-
-with mygraph.connect("localhost", 6660) as db:
-    alice = db.create_node("User", {"name": "Alice"})
-    db.find_nodes("User", {"name": "Alice"})
-    db.update_node(alice.id, {"age": 26})
-    db.delete_node(alice.id)
+python3 python/examples/crud.py                 # needs the server above
 ```
 
 ## Releasing
@@ -386,7 +499,7 @@ See [python/README.md](python/README.md#releasing-to-pypi). It has its own
 version and its own tags (`py-vX.Y.Z`). Release it too when the protocol
 changes, so the client can read the new values.
 
-## Workspace
+## Architecture
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
@@ -402,7 +515,7 @@ All mutations are invertible `Change` records applied through one entry point
 (`Graph::apply`). The same records are the redo log written to the WAL and,
 inverted, the undo log used for rollback.
 
-## v0.1 design decisions
+### Design decisions (v0.1)
 
 - **Storage:** the whole catalog is kept in memory and persisted as WAL plus
   full snapshots, not in pages with a buffer pool. The `Store`
@@ -420,3 +533,7 @@ inverted, the undo log used for rollback.
   with concurrent execution. Each connection gets its own `Session`
   (`Database::session()`), so `USE DATABASE` does not leak between clients.
 - **Leniency:** clauses may follow `CREATE` without a `WITH` in between.
+
+## License
+
+[MIT](LICENSE) © 2026 Julio Contreras

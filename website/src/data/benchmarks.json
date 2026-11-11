@@ -1,0 +1,92 @@
+{
+  "source": "Graph database benchmark report, 10-11-2026",
+  "mygraphVersion": "0.1.0",
+  "engines": [
+    { "id": "neo4j", "name": "Neo4j" },
+    { "id": "memgraph", "name": "Memgraph" },
+    { "id": "dgraph", "name": "Dgraph" },
+    { "id": "arcadedb", "name": "ArcadeDB" },
+    { "id": "mygraph", "name": "MyGraph v0.1" }
+  ],
+  "summary": {
+    "caption": "Largest graph, ×500: 50,677 nodes / 100,525 relationships",
+    "rows": [
+      { "label": "Load (100,525 relationships)", "values": ["3.5 s", "2.6 s", "8.5 s", "11.6 s", "28.1 s"], "best": [1] },
+      { "label": "Sum of 13 searches (p50)", "values": ["386 ms", "338 ms", "1,052 ms", "2,956 ms", "888 ms"], "best": [1] },
+      { "label": "Searches won (of 13)", "values": ["5", "7", "1", "0", "0"], "best": [1] },
+      { "label": "Updates won (of 7)", "values": ["0", "7", "0", "0", "0"], "best": [1] },
+      { "label": "Memory after load", "values": ["2,793 MB", "167 MB", "2,553 MB", "3,410 MB", "230 MB"], "best": [1] },
+      { "label": "Stability at ×500", "values": ["No issues", "No issues", "1 restart, 1 failed test", "No issues", "No issues"], "best": [] },
+      { "label": "Runs the Cypher queries", "values": ["Yes", "Yes, unchanged", "No (own DQL)", "Yes, unchanged", "Partly (no variable-length paths in v0.1)"], "best": [] },
+      { "label": "Free license", "values": ["GPLv3", "BSL 1.1", "Apache 2.0", "Apache 2.0", "MIT"], "best": [4] }
+    ]
+  },
+  "highlights": [
+    { "value": "230 MB", "text": "after loading 100k relationships, versus 2.8 GB (Neo4j) and 3.4 GB (ArcadeDB). Same order as Memgraph (167 MB)." },
+    { "value": "2nd in updates", "text": "after Memgraph: 298 ms in total versus 157 ms." },
+    { "value": "176 ms", "text": "to delete a full snapshot (U4), versus 1,029 ms for Neo4j and 16,496 ms for ArcadeDB." },
+    { "value": "Same results", "text": "as the other four engines in every test and every scale." }
+  ],
+  "load": {
+    "unit": "elements/s",
+    "rows": [
+      { "scale": "×5", "nodes": 535, "relationships": 1030, "values": [1814, 30166, 16456, 5786, 25770] },
+      { "scale": "×50", "nodes": 5092, "relationships": 10075, "values": [14488, 56720, 18251, 10290, 28096] },
+      { "scale": "×500", "nodes": 50677, "relationships": 100525, "values": [42846, 57087, 17704, 12986, 5372] }
+    ]
+  },
+  "searches": {
+    "unit": "ms",
+    "rows": [
+      { "id": "Q1", "label": "Impact of a field change (8 hops)", "values": [1.9, 2.2, 4.0, 1711, 76.8], "rowCount": 48 },
+      { "id": "Q2", "label": "Data lineage between jobs", "values": [34.0, 14.2, 41.6, 24.5, 24.6], "rowCount": 1000 },
+      { "id": "Q3", "label": "Coverage across layers", "values": [26.8, 33.5, 150, 74.5, 85.5], "rowCount": 21 },
+      { "id": "Q4", "label": "Dangling relationships by predicate", "values": [21.6, 17.6, 420, 87.3, 82.4], "rowCount": 5 },
+      { "id": "Q5", "label": "Call cycles", "values": [35.5, 16.1, 49.9, 48.7, 88.6], "rowCount": 1500 },
+      { "id": "Q6", "label": "Dead code", "values": [37.7, 23.2, 38.4, 604, 100], "rowCount": 500 },
+      { "id": "Q7", "label": "Business cluster", "values": [132, 138, 53.5, 161, 127], "rowCount": 8500 },
+      { "id": "Q8", "label": "Impact UI → DAO → table", "values": [39.3, 32.1, 45.2, 53.6, 84.7], "rowCount": 2500 },
+      { "id": "Q9", "label": "Tables shared by two systems", "values": [27.4, 21.3, 59.4, 60.4, 40.9], "rowCount": 1500 },
+      { "id": "Q10", "label": "Target profile check", "values": [3.8, 6.0, 8.0, 66.1, 17.5], "rowCount": 4 },
+      { "id": "Q11", "label": "Neutrality guard", "values": [19.4, 24.7, 136, 28.9, 27.3], "rowCount": 1500 },
+      { "id": "Q12", "label": "Shortest path", "values": [1.2, 0.5, 4.5, 1.3, 100], "rowCount": 1 },
+      { "id": "Q13", "label": "Top 10 by callers", "values": [5.0, 8.9, 41.1, 34.9, 32.3], "rowCount": 10 }
+    ],
+    "sums": [386, 338, 1052, 2956, 888]
+  },
+  "updates": {
+    "unit": "ms",
+    "rows": [
+      { "id": "U1", "label": "Rename a field and mark affected nodes", "values": [1.3, 1.1, 3.5, 5.7, 12.3] },
+      { "id": "U1r", "label": "Reverse", "values": [1.2, 1.1, 3.5, 5.7, 12.5] },
+      { "id": "U2", "label": "Create nodes for gaps", "values": [78.2, 27.9, 854, 135, 55.8] },
+      { "id": "U2r", "label": "Reverse (delete)", "values": [49.7, 6.8, 965, 1565, 16.4] },
+      { "id": "U3", "label": "Resolve dangling relationships", "values": [49.6, 13.8, 233, 254, 15.4] },
+      { "id": "U3b", "label": "Delete orphans", "values": [16.9, 3.8, 189, 122, 9.6] },
+      { "id": "U4", "label": "Delete a full snapshot", "values": [1029, 102, null, 16496, 176] }
+    ]
+  },
+  "memoryMB": [2793, 167, 2553, 3410, 230],
+  "licenses": {
+    "checked": "10-11-2026",
+    "rows": [
+      { "label": "Free edition", "values": ["Community, GPLv3", "Community, BSL 1.1", "Apache 2.0", "Apache 2.0", "MIT"] },
+      { "label": "What the free edition allows", "values": ["Any use, including distribution under GPLv3 terms", "Internal use only", "Any use", "Any use", "Any use"] },
+      { "label": "Shipped inside your product", "values": ["Free, complying with GPLv3", "Commercial license (from $25,000/year)", "Free", "Free", "Free"] }
+    ],
+    "sources": [
+      { "name": "Neo4j", "url": "https://neo4j.com/pricing/" },
+      { "name": "Memgraph", "url": "https://memgraph.com/pricing" },
+      { "name": "Dgraph", "url": "https://github.com/hypermodeinc/dgraph" },
+      { "name": "ArcadeDB", "url": "https://github.com/ArcadeData/arcadedb" },
+      { "name": "MyGraph", "url": "https://github.com/julioacontreras/my-graph/blob/main/LICENSE" }
+    ]
+  },
+  "versions": [
+    "neo4j:2026.09.0-community",
+    "memgraph/memgraph:3.14.0",
+    "dgraph/standalone:v25.5.0",
+    "arcadedata/arcadedb:26.10.2",
+    "julioacontreras/mygraph:latest (v0.1.0, sha256:b4ecc50fbd5b)"
+  ]
+}

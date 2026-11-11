@@ -1,0 +1,2 @@
+[dependencies]
+mygraph = { git = "https://github.com/julioacontreras/my-graph.git" }

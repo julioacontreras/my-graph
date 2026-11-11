@@ -1,0 +1,19 @@
+@theme {
+  --color-primary: #006cfc;
+  --color-primary-hover: #1a7dff;
+  --color-violet: #8b2cf5;
+  --color-link: #4d9bff;
+  --color-bg: #0b1020;
+  --color-surface: #151d30;
+  --color-elevated: #1e293b;
+  --color-line: #29364d;
+  --color-fg: #f8fafc;
+  --color-muted: #94a3b8;
+  --color-danger: #f87171;
+  --color-warn: #fbbf24;
+  --color-ok: #4ade80;
+
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Outfit Variable", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+}

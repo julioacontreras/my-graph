@@ -1,0 +1,19 @@
+# MyGraph
+
+> MyGraph is an open-source (MIT) property-graph database written in Rust and queried with Cypher. It runs embedded in a Rust program or as a TCP server (port 6660), with a Python client and a CLI. The graph lives in memory and is persisted with a write-ahead log and snapshots.
+
+Not supported yet: MERGE, UNION, range or composite indexes, MVCC/concurrent writers, page-based storage, authentication (AUTH is accepted but not checked), TLS. Property indexes are not created automatically.
+
+## Docs
+
+- [Full quick reference](llms-full.txt): status, install, CLIs, JSON result format, sessions, Cypher examples, indexes
+- [README](https://github.com/julioacontreras/my-graph#readme): overview, embedded Rust usage, workspace
+- [Python client](https://github.com/julioacontreras/my-graph/blob/main/python/README.md): `pip install mygraph-client`, API and errors
+- [Wire protocol v1](https://github.com/julioacontreras/my-graph/blob/main/PROTOCOL.md)
+- [Changelog](https://github.com/julioacontreras/my-graph/blob/main/CHANGELOG.md)
+
+## Install
+
+- Server: `docker run -d --name mygraph -p 6660:6660 -v mygraph-data:/data julioacontreras/mygraph:latest`
+- Python client and `mygraph-client` command: `pip install mygraph-client`
+- Rust CLI: `cargo install --git https://github.com/julioacontreras/my-graph.git mygraph-cli`
