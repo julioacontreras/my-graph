@@ -6,11 +6,16 @@
 pub mod catalog;
 pub mod error;
 pub mod graph;
+pub mod path_cache;
 pub mod transaction;
 pub mod value;
 
 pub use catalog::{Catalog, GraphDatabase, IdAllocator, Op, Schema, DEFAULT_DATABASE, DEFAULT_SCHEMA};
 pub use error::{MyGraphError, Result};
-pub use graph::{Change, Graph, IndexInfo, IndexKey, LabelId, Node, NodeId, RelId, RelTypeId, Relationship, SchemaId};
+pub use graph::{
+    Adjacent, Change, Graph, IdHasher, IdMap, IdSet, IndexInfo, IndexKey, LabelId, Node, NodeId, RelId, RelTypeId,
+    Relationship, SchemaId,
+};
+pub use path_cache::{CachedPaths, PathCache, PathKey, DEFAULT_PATH_CACHE_ENTRIES};
 pub use transaction::{now_millis, Journal, WriteContext};
 pub use value::{format_identifier, NodeValue, PathValue, PropertyMap, RelationshipValue, Value};

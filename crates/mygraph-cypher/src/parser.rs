@@ -474,7 +474,11 @@ impl Parser<'_> {
             let node = self.node_pattern()?;
             steps.push((rel, node));
         }
+        let mut weight = None;
         if shortest.is_some() {
+            if self.eat(&Tok::Comma) {
+                weight = Some(self.shortest_options()?);
+            }
             self.expect(&Tok::RParen, "`)` to close shortestPath")?;
             if steps.len() != 1 {
                 return Err(self.error("shortestPath needs a pattern with exactly one relationship"));
@@ -482,8 +486,31 @@ impl Parser<'_> {
             if steps[0].0.length.is_some_and(|l| l.min > 1) {
                 return Err(self.error("shortestPath supports a minimum length of 0 or 1 only"));
             }
+            if weight.is_some() {
+                if shortest == Some(Shortest::All) {
+                    return Err(self.error("allShortestPaths does not support a weight yet"));
+                }
+                if steps[0].0.length.is_none_or(|l| l.max.is_some()) {
+                    return Err(self.error("a weighted shortestPath needs a relationship of any length, like `-[*]->`"));
+                }
+            }
         }
-        Ok(PathPattern { name, shortest, start, steps })
+        Ok(PathPattern { name, shortest, weight, start, steps })
+    }
+
+    /// `{weight: 'property'}` after the pattern of a shortest path. Returns the
+    /// property name.
+    fn shortest_options(&mut self) -> Result<String> {
+        let Expr::Map(entries) = self.map_literal()? else { unreachable!("map_literal returns a map") };
+        let mut weight = None;
+        for (key, value) in entries {
+            match (key.as_str(), value) {
+                ("weight", Expr::Literal(Value::String(p))) => weight = Some(p),
+                ("weight", _) => return Err(self.error("the shortestPath `weight` must be a property name string")),
+                (other, _) => return Err(self.error(format!("unknown shortestPath option `{other}`"))),
+            }
+        }
+        weight.ok_or_else(|| self.error("shortestPath options need a `weight`"))
     }
 
     /// After `*`: `n`, `n..`, `..m`, `n..m` or nothing.

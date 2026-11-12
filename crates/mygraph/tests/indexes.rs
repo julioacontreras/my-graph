@@ -202,6 +202,103 @@ fn planned_matches_equal_written_order() {
     assert_eq!(rows(&plain, PLANNED[16], params! {}), vec![vec![9.into(), Value::Null]]);
 }
 
+/// The rows of `q` in a canonical order: without ORDER BY, a reversed or split
+/// path may legitimately return the same rows in another order.
+fn unordered(db: &Database, q: &str, p: Params) -> Vec<String> {
+    let mut out: Vec<String> = rows(db, q, p).iter().map(|r| format!("{r:?}")).collect();
+    out.sort();
+    out
+}
+
+/// `chain(true)` plus a self-loop on node 5. Relationship ids: 0..=8 NEXT,
+/// 9 and 10 JUMP, 11 LOOP.
+fn chain_with_loop() -> Database {
+    let db = chain(true);
+    db.execute("MATCH (n:N {i: 5}) CREATE (n)-[:LOOP]->(n)", params! {}).unwrap();
+    db
+}
+
+#[test]
+fn relationship_id_lookups_equal_a_scan() {
+    // `id(r) + 0 = $id` means the same but is not recognised as a lookup, so
+    // it gives the scan result to compare against
+    let db = chain_with_loop();
+    let queries = [
+        "MATCH (a)-[r]->(b) WHERE {id} RETURN a.i, b.i, type(r)",
+        "MATCH (a)<-[r]-(b) WHERE {id} RETURN a.i, b.i, type(r)",
+        "MATCH (a)-[r]-(b) WHERE {id} RETURN a.i, b.i, type(r)",
+        "MATCH (a)-[r:JUMP]->(b) WHERE {id} RETURN a.i, b.i",
+        // the relationship is the second step: the path is reversed
+        "MATCH (a)-[q]->(b)-[r]->(c) WHERE {id} RETURN a.i, b.i, c.i, type(q)",
+        // ... or split, when it is in the middle
+        "MATCH (a)-[q]->(b)-[r]->(c)-[s]->(d) WHERE {id} RETURN a.i, d.i",
+        // named paths are only reversed
+        "MATCH p = (a)-[q]->(b)-[r]->(c) WHERE {id} RETURN length(p), a.i, c.i",
+        "MATCH ()-[r]->() WHERE {id} RETURN count(*)",
+    ];
+    for id in -1..14 {
+        for q in queries {
+            let fast = q.replace("{id}", "id(r) = $id");
+            let scan = q.replace("{id}", "id(r) + 0 = $id");
+            let p = || params! { "id" => id };
+            assert_eq!(unordered(&db, &fast, p()), unordered(&db, &scan, p()), "id {id}: {fast}");
+        }
+    }
+    let p = || params! { "ids" => vec![Value::from(10), Value::from(1), Value::from(99), Value::Null] };
+    assert_eq!(
+        unordered(&db, "MATCH (a)-[r]->(b) WHERE id(r) IN $ids RETURN a.i, b.i", p()),
+        unordered(&db, "MATCH (a)-[r]->(b) WHERE id(r) + 0 IN $ids RETURN a.i, b.i", p()),
+    );
+    assert_eq!(
+        rows(&db, "MATCH (a)-[r]->(b) WHERE id(r) = 4.0 RETURN a.i, b.i", params! {}),
+        vec![vec![4.into(), 5.into()]]
+    );
+    assert!(rows(&db, "MATCH (a)-[r]->(b) WHERE id(r) = null RETURN a", params! {}).is_empty());
+}
+
+#[test]
+fn bound_relationships_anchor_the_next_match() {
+    let db = chain_with_loop();
+    let q = "MATCH ()-[r:JUMP]->() WITH r MATCH (a)-[r]->(b) RETURN a.i, b.i ORDER BY a.i";
+    assert_eq!(rows(&db, q, params! {}), vec![vec![3.into(), 7.into()], vec![7.into(), 3.into()]]);
+    let q = "MATCH ()-[r:LOOP]->() WITH r MATCH (a)-[r]-(b) RETURN a.i, b.i";
+    assert_eq!(rows(&db, q, params! {}), vec![vec![5.into(), 5.into()]]);
+    // a bound relationship that does not fit the pattern matches nothing
+    let q = "MATCH ()-[r:JUMP]->() WITH r MATCH (a)<-[r]-(b:N {i: 0}) RETURN a";
+    assert!(rows(&db, q, params! {}).is_empty());
+}
+
+#[test]
+fn relationship_type_anchors_equal_a_scan() {
+    // `type(r) = 'T'` is checked per row instead of starting from the type
+    let db = chain_with_loop();
+    let pairs = [
+        ("MATCH (a)-[:JUMP]->(b) RETURN a.i, b.i", "MATCH (a)-[r]->(b) WHERE type(r) = 'JUMP' RETURN a.i, b.i"),
+        ("MATCH (a)<-[:JUMP]-(b) RETURN a.i, b.i", "MATCH (a)<-[r]-(b) WHERE type(r) = 'JUMP' RETURN a.i, b.i"),
+        ("MATCH (a)-[:LOOP]-(b) RETURN a.i, b.i", "MATCH (a)-[r]-(b) WHERE type(r) = 'LOOP' RETURN a.i, b.i"),
+        (
+            "MATCH (a)-[:JUMP|LOOP]-(b) RETURN a.i, b.i",
+            "MATCH (a)-[r]-(b) WHERE type(r) IN ['JUMP', 'LOOP'] RETURN a.i, b.i",
+        ),
+        (
+            "MATCH (a:N)-[:NEXT]->(b)-[:JUMP]->(c) RETURN a.i, b.i, c.i",
+            "MATCH (a:N)-[r]->(b)-[s]->(c) WHERE type(r) = 'NEXT' AND type(s) = 'JUMP' RETURN a.i, b.i, c.i",
+        ),
+        ("MATCH (a)-[:MISSING]->(b) RETURN a", "MATCH (a)-[r]->(b) WHERE type(r) = 'MISSING' RETURN a"),
+    ];
+    for (fast, scan) in pairs {
+        assert_eq!(unordered(&db, fast, params! {}), unordered(&db, scan, params! {}), "{fast}");
+    }
+    // the relationship type index follows deletes and rollbacks
+    db.execute("MATCH ()-[r:JUMP]->(b {i: 3}) DELETE r", params! {}).unwrap();
+    {
+        let mut tx = db.begin_transaction().unwrap();
+        tx.execute("MATCH (a {i: 0}), (b {i: 9}) CREATE (a)-[:JUMP]->(b)", params! {}).unwrap();
+        tx.rollback().unwrap();
+    }
+    assert_eq!(rows(&db, "MATCH (a)-[:JUMP]->(b) RETURN a.i, b.i", params! {}), vec![vec![3.into(), 7.into()]]);
+}
+
 #[test]
 fn where_type_errors_are_still_reported() {
     let db = chain(true);

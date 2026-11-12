@@ -10,17 +10,24 @@
 //! # Ok::<(), mygraph::MyGraphError>(())
 //! ```
 //!
-//! Concurrency in v0.1: a [`Database`] is `Send + Sync`, but statements are
-//! serialized, and an explicit [`Transaction`] holds exclusive access until it
-//! is committed or rolled back. MVCC is planned for a later phase.
+//! Concurrency: a [`Database`] is `Send + Sync`. Scripts made only of
+//! read-only queries (no CREATE, SET, REMOVE or DELETE) run concurrently, each
+//! seeing a consistent graph; anything else runs alone. An explicit
+//! [`Transaction`] holds exclusive access until it is committed or rolled
+//! back. MVCC is planned for a later phase.
 
 mod config;
 mod result;
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use mygraph_core::{Catalog, Change, Journal, Op, WriteContext, DEFAULT_DATABASE, DEFAULT_SCHEMA};
 use mygraph_cypher::{AdminCommand, ExecResult, IndexTarget, Query, Statement};
+
+/// Whether a parsed script only reads, so it can share the database.
+fn read_only(statements: &[Statement]) -> bool {
+    statements.iter().all(|s| matches!(s, Statement::Query(q) if q.is_read_only()))
+}
 use mygraph_storage::{RecoveryInfo, Store, StoreConfig};
 
 pub use config::Config;
@@ -44,7 +51,7 @@ macro_rules! params {
 
 /// An open MyGraph instance (all of its databases).
 pub struct Database {
-    inner: Mutex<Inner>,
+    inner: RwLock<Inner>,
     /// The session used by [`Database::execute`] and friends.
     default_session: Mutex<SessionState>,
 }
@@ -86,15 +93,21 @@ impl Database {
 
     fn from_parts(catalog: Catalog, store: Option<Store>, config: Config) -> Self {
         Database {
-            inner: Mutex::new(Inner { catalog, store, config }),
+            inner: RwLock::new(Inner { catalog, store, config }),
             default_session: Mutex::new(SessionState::default()),
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Inner> {
+    /// Exclusive access, for anything that may write.
+    fn lock(&self) -> RwLockWriteGuard<'_, Inner> {
         // A panic while holding the lock cannot leave a half-applied statement
         // committed: changes are only persisted after a statement succeeds.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Shared access, for read-only scripts.
+    fn read(&self) -> RwLockReadGuard<'_, Inner> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner())
     }
 
     fn default_session(&self) -> MutexGuard<'_, SessionState> {
@@ -113,15 +126,46 @@ impl Database {
     /// parsed before anything runs. Returns the last statement's rows, with
     /// stats summed over all statements.
     pub fn execute(&self, query: &str, params: Params) -> Result<QueryResult> {
+        let statements = mygraph_cypher::parse(query)?;
+        if read_only(&statements) {
+            // a read cannot change the session: release it so other threads
+            // using the default session can read at the same time
+            let session = self.default_session().clone();
+            return self.read_script(&session, &statements, &params);
+        }
         let mut session = self.default_session();
-        self.execute_in_session(&mut session, query, &params)
+        self.write_script(&mut session, &statements, &params)
     }
 
     fn execute_in_session(&self, session: &mut SessionState, query: &str, params: &Params) -> Result<QueryResult> {
         let statements = mygraph_cypher::parse(query)?;
-        let mut inner = self.lock();
+        if read_only(&statements) {
+            return self.read_script(session, &statements, params);
+        }
+        self.write_script(session, &statements, params)
+    }
+
+    /// Runs a script of read-only queries with shared access.
+    fn read_script(&self, session: &SessionState, statements: &[Statement], params: &Params) -> Result<QueryResult> {
+        let inner = self.read();
         let mut result = QueryResult::default();
-        for stmt in &statements {
+        for stmt in statements {
+            let Statement::Query(q) = stmt else { unreachable!("checked by read_only") };
+            result = inner.read_query(session, q, params)?.into();
+        }
+        Ok(result)
+    }
+
+    /// Runs a script that may write, with exclusive access.
+    fn write_script(
+        &self,
+        session: &mut SessionState,
+        statements: &[Statement],
+        params: &Params,
+    ) -> Result<QueryResult> {
+        let mut result = QueryResult::default();
+        let mut inner = self.lock();
+        for stmt in statements {
             let r = inner.run_statement(session, stmt, params)?;
             let stats = std::mem::take(&mut result.stats);
             result = r;
@@ -161,7 +205,7 @@ impl Database {
 
     /// What happened during recovery when the instance was opened.
     pub fn recovery_info(&self) -> Option<RecoveryInfo> {
-        self.lock().store.as_ref().map(|s| s.recovery_info().clone())
+        self.read().store.as_ref().map(|s| s.recovery_info().clone())
     }
 }
 
@@ -177,6 +221,13 @@ fn empty_result() -> QueryResult {
 }
 
 impl Inner {
+    /// Runs a read-only query with shared access: nothing to journal or persist.
+    fn read_query(&self, session: &SessionState, q: &Query, params: &Params) -> Result<ExecResult> {
+        let graph = &self.catalog.database(&session.database)?.schema(&session.schema)?.graph;
+        graph.set_path_cache_capacity(self.config.path_cache_entries);
+        mygraph_cypher::execute_read(q, graph, params)
+    }
+
     fn run_statement(&mut self, session: &mut SessionState, stmt: &Statement, params: &Params) -> Result<QueryResult> {
         match stmt {
             Statement::Admin(cmd) => self.run_admin(session, cmd),
@@ -209,6 +260,7 @@ impl Inner {
         journal: &mut Journal,
     ) -> Result<ExecResult> {
         let (graph, ids) = self.catalog.database_mut(db)?.write_parts(schema)?;
+        graph.set_path_cache_capacity(self.config.path_cache_entries);
         let mut ctx = WriteContext::new(graph, ids, journal);
         mygraph_cypher::execute(q, &mut ctx, params)
     }
@@ -433,7 +485,7 @@ impl<'db> Session<'db> {
 /// undone, earlier statements are kept. `commit` makes everything durable;
 /// `rollback` (or dropping the transaction) undoes everything.
 pub struct Transaction<'db> {
-    inner: MutexGuard<'db, Inner>,
+    inner: RwLockWriteGuard<'db, Inner>,
     journal: Journal,
     database: String,
     schema: String,
@@ -491,5 +543,34 @@ impl Drop for Transaction<'_> {
         if !self.finished {
             let _ = self.undo_all();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn reads_share_the_database_and_writes_wait() {
+        let db = Database::in_memory().unwrap();
+        db.execute("CREATE (:N {i: 1})", params! {}).unwrap();
+        let db = &db;
+        let held = db.read(); // as if a long read-only query were running
+        std::thread::scope(|s| {
+            let (tx, rx) = mpsc::channel();
+            s.spawn(move || tx.send(db.execute("MATCH (n:N) RETURN n.i", params! {}).map(|r| r.rows.len())).unwrap());
+            let read = rx.recv_timeout(Duration::from_secs(10)).expect("a read must not wait for another read");
+            assert_eq!(read.unwrap(), 1);
+
+            let (tx, rx) = mpsc::channel();
+            s.spawn(move || tx.send(db.execute("CREATE (:N {i: 2})", params! {}).is_ok()).unwrap());
+            assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "a write must wait for readers");
+            drop(held);
+            assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap());
+        });
+        assert_eq!(db.execute("MATCH (n:N) RETURN n", params! {}).unwrap().rows.len(), 2);
     }
 }

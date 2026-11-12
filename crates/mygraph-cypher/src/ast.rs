@@ -85,6 +85,9 @@ pub struct PathPattern {
     /// `p = (a)-->(b)`: binds the matched path to `p`.
     pub name: Option<String>,
     pub shortest: Option<Shortest>,
+    /// `shortestPath(..., {weight: 'cost'})`: the relationship property whose
+    /// sum the path minimises, instead of the number of relationships.
+    pub weight: Option<String>,
     pub start: NodePattern,
     pub steps: Vec<(RelPattern, NodePattern)>,
 }

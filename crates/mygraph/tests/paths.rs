@@ -257,3 +257,173 @@ fn bidirectional_shortest_path_agrees_with_breadth_first_search() {
         }
     }
 }
+
+/// Total weight of the single path a `... p = shortestPath(...)` query finds,
+/// or `None` when it finds none. `q` must bind the path as `p`.
+fn path_cost(db: &Database, q: &str, p: Params) -> Option<f64> {
+    let q = format!("{q} UNWIND relationships(p) AS r RETURN count(*) AS n, sum(r.cost) AS c");
+    let rows = db.execute(&q, p).unwrap_or_else(|e| panic!("{q}: {e}")).rows;
+    match rows.first().map(|r| (&r[0], &r[1])) {
+        Some((Value::Integer(0), _)) | None => None,
+        Some((_, Value::Integer(c))) => Some(*c as f64),
+        Some((_, Value::Float(c))) => Some(*c),
+        other => panic!("unexpected row {other:?}"),
+    }
+}
+
+/// s -[1]-> x -[2]-> t, s -[10]-> t (direct but heavy), t -[1]-> s, and an
+/// isolated node u. Every relationship is `:R` with a `cost`.
+fn weighted() -> Database {
+    let db = Database::in_memory().unwrap();
+    db.execute(
+        "CREATE (s:W {n: 's'}), (x:W {n: 'x'}), (t:W {n: 't'}), (:W {n: 'u'}),
+                (s)-[:R {cost: 1}]->(x), (x)-[:R {cost: 2}]->(t), (s)-[:R {cost: 10}]->(t), (t)-[:R {cost: 1}]->(s)",
+        params! {},
+    )
+    .unwrap();
+    db
+}
+
+const LIGHTEST_S_T: &str =
+    "MATCH (s:W {n: 's'}), (t:W {n: 't'}), p = shortestPath((s)-[:R*]->(t), {weight: 'cost'}) RETURN p";
+
+#[test]
+fn weighted_shortest_path_prefers_the_lighter_route() {
+    let db = weighted();
+    // by hops the direct relationship wins; by weight the detour does
+    let hops = rows(&db, "MATCH (s:W {n: 's'}), (t:W {n: 't'}), p = shortestPath((s)-[:R*]->(t)) RETURN p");
+    assert_eq!(path_names(&hops[0][0]), ["s", "t"]);
+    let r = rows(&db, LIGHTEST_S_T);
+    assert_eq!(path_names(&r[0][0]), ["s", "x", "t"]);
+    let q = "MATCH (s:W {n: 's'}), (t:W {n: 't'}), p = shortestPath((s)-[:R*]->(t), {weight: 'cost'})";
+    assert_eq!(path_cost(&db, q, params! {}), Some(3.0));
+
+    // the result follows weight changes
+    db.execute("MATCH (:W {n: 's'})-[r:R]->(:W {n: 't'}) SET r.cost = 2.5", params! {}).unwrap();
+    assert_eq!(path_names(&rows(&db, LIGHTEST_S_T)[0][0]), ["s", "t"]);
+    assert_eq!(path_cost(&db, q, params! {}), Some(2.5));
+
+    // undirected: t -> s directly weighs 1 (t-[1]->s), against t<-[2.5]-s
+    let q = "MATCH (s:W {n: 's'}), (t:W {n: 't'}), p = shortestPath((t)-[*]-(s), {weight: 'cost'})";
+    assert_eq!(path_cost(&db, q, params! {}), Some(1.0));
+    // against the relationships' direction
+    let q = "MATCH (s:W {n: 's'}), (x:W {n: 'x'}), p = shortestPath((x)<-[*]-(s), {weight: 'cost'})";
+    assert_eq!(path_cost(&db, q, params! {}), Some(1.0));
+}
+
+#[test]
+fn weighted_shortest_path_edge_cases() {
+    let db = weighted();
+    let one = |q: &str| rows(&db, q);
+    // no path, and OPTIONAL MATCH keeps the row
+    let q = "MATCH (s:W {n: 's'}), (u:W {n: 'u'}), p = shortestPath((s)-[*]->(u), {weight: 'cost'}) RETURN p";
+    assert!(one(q).is_empty());
+    let q =
+        "MATCH (s:W {n: 's'}), (u:W {n: 'u'}) OPTIONAL MATCH p = shortestPath((s)-[*]->(u), {weight: 'cost'}) RETURN p";
+    assert_eq!(one(q), vec![vec![Value::Null]]);
+    // same start and end node
+    assert!(one("MATCH (s:W {n: 's'}), p = shortestPath((s)-[*]->(s), {weight: 'cost'}) RETURN p").is_empty());
+    let q = "MATCH (s:W {n: 's'}), p = shortestPath((s)-[*0..]->(s), {weight: 'cost'}) RETURN length(p)";
+    assert_eq!(one(q), vec![vec![Value::Integer(0)]]);
+    // relationships of another type are not followed
+    let q = "MATCH (s:W {n: 's'}), (t:W {n: 't'}), p = shortestPath((s)-[:OTHER*]->(t), {weight: 'cost'}) RETURN p";
+    assert!(one(q).is_empty());
+    // the relationship variable holds the list of relationships
+    let q = "MATCH (s:W {n: 's'}), (t:W {n: 't'}), shortestPath((s)-[rs*]->(t), {weight: 'cost'}) RETURN size(rs)";
+    assert_eq!(one(q), vec![vec![Value::Integer(2)]]);
+    // a relationship of weight 0
+    db.execute("MATCH (:W {n: 's'})-[r:R]->(:W {n: 'x'}) SET r.cost = 0", params! {}).unwrap();
+    let q = "MATCH (s:W {n: 's'}), (t:W {n: 't'}), p = shortestPath((s)-[*]->(t), {weight: 'cost'})";
+    assert_eq!(path_cost(&db, q, params! {}), Some(2.0));
+}
+
+#[test]
+fn weighted_shortest_path_rejects_bad_weights() {
+    let q = "MATCH (s:W {n: 's'}), (t:W {n: 't'}), p = shortestPath((s)-[*]->(t), {weight: 'cost'}) RETURN p";
+    for bad in ["-1", "'heavy'", "null", "[1]"] {
+        let db = weighted();
+        db.execute(&format!("MATCH (:W {{n: 's'}})-[r:R]->(:W {{n: 'x'}}) SET r.cost = {bad}"), params! {}).unwrap();
+        let err = db.execute(q, params! {}).expect_err(bad).to_string();
+        assert!(err.contains("weight"), "{bad}: {err}");
+    }
+    // a relationship the search never reaches does not matter
+    let db = weighted();
+    db.execute("MATCH (u:W {n: 'u'}) CREATE (u)-[:R {cost: -5}]->(u)", params! {}).unwrap();
+    assert_eq!(path_names(&rows(&db, LIGHTEST_S_T)[0][0]), ["s", "x", "t"]);
+}
+
+#[test]
+fn invalid_weighted_shortest_path_syntax() {
+    let db = weighted();
+    for q in [
+        "MATCH p = allShortestPaths((a)-[*]->(b), {weight: 'cost'}) RETURN p",
+        "MATCH p = shortestPath((a)-[*..3]->(b), {weight: 'cost'}) RETURN p",
+        "MATCH p = shortestPath((a)-[r]->(b), {weight: 'cost'}) RETURN p",
+        "MATCH p = shortestPath((a)-[*]->(b), {weight: cost}) RETURN p",
+        "MATCH p = shortestPath((a)-[*]->(b), {weight: 1}) RETURN p",
+        "MATCH p = shortestPath((a)-[*]->(b), {cost: 'cost'}) RETURN p",
+        "MATCH p = shortestPath((a)-[*]->(b), {}) RETURN p",
+    ] {
+        assert!(db.execute(q, params! {}).is_err(), "{q} should fail");
+    }
+}
+
+/// Reference: Dijkstra over an explicit edge list, O(V^2).
+fn reference_distance(n: usize, edges: &[(usize, usize, i64)], s: usize, t: usize, undirected: bool) -> Option<i64> {
+    let mut dist = vec![i64::MAX; n];
+    let mut done = vec![false; n];
+    dist[s] = 0;
+    while let Some(u) = (0..n).filter(|&i| !done[i] && dist[i] != i64::MAX).min_by_key(|&i| dist[i]) {
+        done[u] = true;
+        for &(a, b, w) in edges {
+            for (from, to) in [(a, b), (b, a)].into_iter().take(if undirected { 2 } else { 1 }) {
+                if from == u && dist[u] + w < dist[to] {
+                    dist[to] = dist[u] + w;
+                }
+            }
+        }
+    }
+    (dist[t] != i64::MAX).then_some(dist[t])
+}
+
+#[test]
+fn weighted_shortest_path_agrees_with_a_reference_dijkstra() {
+    let db = Database::in_memory().unwrap();
+    db.execute("CREATE INDEX ON :V(i)", params! {}).unwrap();
+    let n = 120;
+    db.execute("UNWIND range(0, 119) AS i CREATE (:V {i: i})", params! {}).unwrap();
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = |m: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % m
+    };
+    let edges: Vec<(usize, usize, i64)> =
+        (0..300).map(|_| (next(n as u64) as usize, next(n as u64) as usize, next(20) as i64)).collect();
+    let list = edges
+        .iter()
+        .map(|&(a, b, w)| Value::List(vec![(a as i64).into(), (b as i64).into(), w.into()]))
+        .collect::<Vec<_>>();
+    db.execute(
+        "UNWIND $edges AS e MATCH (a:V {i: e[0]}), (b:V {i: e[1]}) CREATE (a)-[:E {cost: e[2]}]->(b)",
+        [("edges".to_string(), Value::List(list))].into(),
+    )
+    .unwrap();
+    for _ in 0..100 {
+        let (s, t) = (next(n as u64) as usize, next(n as u64) as usize);
+        if s == t {
+            continue;
+        }
+        for (dir, undirected) in [("->", false), ("-", true)] {
+            let q = format!(
+                "MATCH (a:V {{i: $s}}), (b:V {{i: $t}}), p = shortestPath((a)-[*]{dir}(b), {{weight: 'cost'}})"
+            );
+            let p: Params = [("s".to_string(), Value::from(s as i64)), ("t".to_string(), Value::from(t as i64))].into();
+            let found = path_cost(&db, &q, p);
+            let expected = reference_distance(n, &edges, s, t, undirected).map(|d| d as f64);
+            // a found path of weight 0 has relationships, so path_cost sees it
+            assert_eq!(found, expected, "{s} {dir} {t}");
+        }
+    }
+}

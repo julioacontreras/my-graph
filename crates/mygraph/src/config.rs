@@ -12,11 +12,18 @@ pub struct Config {
     pub(crate) cache_size_mb: usize,
     pub(crate) sync_on_commit: bool,
     pub(crate) checkpoint_wal_bytes: u64,
+    pub(crate) path_cache_entries: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { storage_path: None, cache_size_mb: 1024, sync_on_commit: true, checkpoint_wal_bytes: 64 * 1024 * 1024 }
+        Config {
+            storage_path: None,
+            cache_size_mb: 1024,
+            sync_on_commit: true,
+            checkpoint_wal_bytes: 64 * 1024 * 1024,
+            path_cache_entries: mygraph_core::DEFAULT_PATH_CACHE_ENTRIES,
+        }
     }
 }
 
@@ -45,6 +52,18 @@ impl Config {
     pub fn checkpoint_wal_bytes(mut self, bytes: u64) -> Self {
         self.checkpoint_wal_bytes = bytes;
         self
+    }
+
+    /// Shortest-path searches remembered per schema (default 10,000; 0
+    /// disables the cache). Cached answers are dropped as soon as a change
+    /// could affect them, so results never differ from an uncached search.
+    pub fn path_cache_entries(mut self, entries: usize) -> Self {
+        self.path_cache_entries = entries;
+        self
+    }
+
+    pub fn get_path_cache_entries(&self) -> usize {
+        self.path_cache_entries
     }
 
     pub fn get_storage_path(&self) -> Option<&Path> {

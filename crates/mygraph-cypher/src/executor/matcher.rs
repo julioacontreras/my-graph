@@ -17,12 +17,13 @@
 //! whole MATCH, node and relationship checks on every step), so the plan only
 //! changes how fast results are found, not which results are found.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
-use mygraph_core::{Graph, LabelId, NodeId, PropertyMap, RelId, Result, Value};
+use mygraph_core::{Adjacent, Graph, LabelId, NodeId, PathKey, PropertyMap, RelId, Result, Value};
 
 use crate::ast::*;
 use crate::executor::eval::{equals, type_err, Env, Row, Val};
+use crate::executor::paths::{self, Path};
 
 /// Prefix of the variables the planner introduces. The leading space keeps
 /// them out of `RETURN *` and makes collisions with user variables impossible.
@@ -166,6 +167,17 @@ fn hint_from(e: &Expr) -> Option<Hint> {
     }
 }
 
+/// A node or relationship id given in a query: `Some(None)` for null (matches
+/// nothing), `None` for a value that is not an id (the lookup is not used).
+fn id_of(v: &Val) -> Option<Option<u64>> {
+    match v {
+        Val::Int(i) => Some((*i >= 0).then_some(*i as u64)),
+        Val::Float(f) if f.fract() == 0.0 && *f >= 0.0 && *f < 9.0e15 => Some(Some(*f as u64)),
+        Val::Null => Some(None),
+        _ => None,
+    }
+}
+
 fn flip(d: Direction) -> Direction {
     match d {
         Direction::Outgoing => Direction::Incoming,
@@ -192,11 +204,17 @@ fn reversed_prefix(p: &PathPattern, upto: usize) -> PathPattern {
         rel.direction = flip(rel.direction);
         steps.push((rel, node_at(p, i - 1).clone()));
     }
-    PathPattern { name: None, shortest: None, start: node_at(p, upto).clone(), steps }
+    PathPattern { name: None, shortest: None, weight: None, start: node_at(p, upto).clone(), steps }
 }
 
 fn suffix(p: &PathPattern, from: usize) -> PathPattern {
-    PathPattern { name: None, shortest: None, start: node_at(p, from).clone(), steps: p.steps[from..].to_vec() }
+    PathPattern {
+        name: None,
+        shortest: None,
+        weight: None,
+        start: node_at(p, from).clone(),
+        steps: p.steps[from..].to_vec(),
+    }
 }
 
 /// Whether any inline property map uses a variable bound by this MATCH. Such
@@ -311,8 +329,45 @@ impl<'e, 'g> Matcher<'e, 'g> {
             .eval(e, sample)
             .ok()
             .and_then(|v| v.into_property().ok())
-            .and_then(|v| self.env.graph.nodes_by_property(label, key, &v));
-        exact.map_or(3, |ids| ids.len() + 1)
+            .and_then(|v| self.env.graph.count_by_property(label, key, &v));
+        exact.map_or(3, |n| n + 1)
+    }
+
+    /// Estimated number of start candidates when a path is started from the
+    /// relationship `rp` next to its start node (see [`Matcher::rel_candidates`]).
+    fn rel_cost(&self, rp: &RelPattern, bound: &HashSet<String>) -> usize {
+        if rp.length.is_some() {
+            return usize::MAX;
+        }
+        if let Some(v) = &rp.variable {
+            if bound.contains(v) {
+                return 1;
+            }
+            let ready = |h: &&Hint| &h.var == v && h.deps.iter().all(|d| bound.contains(d));
+            for h in self.hints.iter().filter(ready) {
+                match h.lookup {
+                    Lookup::Id(_) => return 1,
+                    Lookup::IdIn(_) => return 2,
+                    _ => {}
+                }
+            }
+        }
+        if rp.types.is_empty() {
+            return usize::MAX;
+        }
+        // doubled to match the threshold in `start_candidates`
+        rp.types.iter().map(|t| self.env.graph.rel_type_count(t)).sum::<usize>().saturating_mul(2) + 2
+    }
+
+    /// The relationship that becomes the first step when the path is started
+    /// at node `i`: the one after it for the first node, otherwise the one
+    /// before it (the path is then reversed or split there).
+    fn first_rel_from(p: &PathPattern, i: usize) -> Option<&RelPattern> {
+        if i == 0 {
+            p.steps.first().map(|(r, _)| r)
+        } else {
+            Some(&p.steps[i - 1].0)
+        }
     }
 
     fn plan(&mut self, patterns: Vec<PathPattern>, sample: &Row) -> Vec<Planned> {
@@ -330,7 +385,8 @@ impl<'e, 'g> Matcher<'e, 'g> {
                     if p.name.is_some() && i != 0 && i != len {
                         continue; // named paths are never split
                     }
-                    let c = self.cost(node_at(p, i), &bound, sample);
+                    let rel = Self::first_rel_from(p, i).map_or(usize::MAX, |r| self.rel_cost(r, &bound));
+                    let c = self.cost(node_at(p, i), &bound, sample).min(rel);
                     if c < best.0 {
                         best = (c, pi, i);
                     }
@@ -419,7 +475,7 @@ impl<'e, 'g> Matcher<'e, 'g> {
         if check.never() {
             return Ok(());
         }
-        for nid in self.start_candidates(&p.start, &row)? {
+        for nid in self.start_candidates(&p.start, p.steps.first().map(|(r, _)| r), &row)? {
             if !check.matches(self.env.graph, nid) {
                 continue;
             }
@@ -432,7 +488,10 @@ impl<'e, 'g> Matcher<'e, 'g> {
         Ok(())
     }
 
-    fn start_candidates(&self, np: &NodePattern, row: &Row) -> Result<Vec<NodeId>> {
+    /// Nodes the path starting at `np` may start from. `first` is the path's
+    /// first relationship step, if any: when it is pinned or rarer than the
+    /// node's label, candidates come from the relationships instead.
+    fn start_candidates(&self, np: &NodePattern, first: Option<&RelPattern>, row: &Row) -> Result<Vec<NodeId>> {
         let g = self.env.graph;
         if let Some(v) = &np.variable {
             if let Some(bound) = row.get(v) {
@@ -456,25 +515,79 @@ impl<'e, 'g> Matcher<'e, 'g> {
                 }
             }
         }
+        if let Some(ids) = first.map(|rp| self.rel_by_id(rp, row)).transpose()?.flatten() {
+            return Ok(ids);
+        }
         let smallest = np.labels.iter().min_by_key(|l| g.label_count(l));
+        let label_count = smallest.map_or(g.node_count(), |l| g.label_count(l));
+        if let Some(rp) = first.filter(|rp| rp.length.is_none() && !rp.types.is_empty()) {
+            let typed: usize = rp.types.iter().map(|t| g.rel_type_count(t)).sum();
+            // collecting endpoints costs a lookup per relationship: only worth
+            // it when the type is clearly rarer than the scan it replaces
+            if typed.saturating_mul(2) < label_count {
+                return Ok(self.rel_endpoints(rp, rp.types.iter().flat_map(|t| g.relationship_ids_with_type(t))));
+            }
+        }
         Ok(match smallest {
             Some(label) => g.node_ids_with_label(label),
             None => g.nodes().map(|n| n.id).collect(),
         })
     }
 
+    /// Start candidates of a path whose first step `rp` is pinned to known
+    /// relationships: a bound variable or an `id(r) = …` / `IN` lookup.
+    /// `None` when `rp` is not pinned.
+    fn rel_by_id(&self, rp: &RelPattern, row: &Row) -> Result<Option<Vec<NodeId>>> {
+        let Some(v) = rp.variable.as_ref().filter(|_| rp.length.is_none()) else { return Ok(None) };
+        if let Some(bound) = row.get(v) {
+            return Ok(match bound {
+                Val::Rel(r) => Some(self.rel_endpoints(rp, [*r])),
+                _ => None, // the expansion reports the type error, or matches nothing
+            });
+        }
+        let ready = |h: &&Hint| &h.var == v && h.deps.iter().all(|d| row.contains_key(d));
+        for h in self.hints.iter().filter(ready) {
+            let ids = match &h.lookup {
+                Lookup::Id(e) => match id_of(&self.env.eval(e, row)?) {
+                    Some(id) => id.into_iter().collect::<Vec<_>>(),
+                    None => continue,
+                },
+                Lookup::IdIn(e) => match self.env.eval(e, row)? {
+                    Val::Null => Vec::new(),
+                    Val::List(items) => match items.iter().map(id_of).collect::<Option<Vec<_>>>() {
+                        Some(ids) => ids.into_iter().flatten().collect(),
+                        None => continue,
+                    },
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            return Ok(Some(self.rel_endpoints(rp, ids)));
+        }
+        Ok(None)
+    }
+
+    /// The nodes a path can start from when its first step is one of `rels`:
+    /// the end of each relationship the step leaves from, in id order.
+    fn rel_endpoints(&self, rp: &RelPattern, rels: impl IntoIterator<Item = RelId>) -> Vec<NodeId> {
+        let g = self.env.graph;
+        let mut out = Vec::new();
+        for r in rels.into_iter().filter_map(|id| g.relationship(id)) {
+            match rp.direction {
+                Direction::Outgoing => out.push(r.start_node),
+                Direction::Incoming => out.push(r.end_node),
+                Direction::Both => out.extend([r.start_node, r.end_node]),
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Candidates from one lookup, or `None` when it cannot be used (no index,
     /// or a value of a type the index does not cover).
     fn lookup(&self, np: &NodePattern, lookup: &Lookup, row: &Row) -> Result<Option<Vec<NodeId>>> {
         let g = self.env.graph;
-        let id_of = |v: &Val| -> Option<Option<NodeId>> {
-            match v {
-                Val::Int(i) => Some((*i >= 0).then_some(*i as NodeId)),
-                Val::Float(f) if f.fract() == 0.0 && *f >= 0.0 && *f < 9.0e15 => Some(Some(*f as NodeId)),
-                Val::Null => Some(None),
-                _ => None,
-            }
-        };
         let by_prop = |key: &str, v: Val| -> Option<Vec<NodeId>> {
             let v = v.into_property().ok()?;
             np.labels.iter().find_map(|l| g.nodes_by_property(l, key, &v))
@@ -563,7 +676,7 @@ impl<'e, 'g> Matcher<'e, 'g> {
                 Some(Val::Rel(_) | Val::Null) => continue,
                 Some(v) => return Err(type_err(format!("expected a RELATIONSHIP, got {}", v.type_name()))),
             }
-            if !st.node_ok(self.env.graph, other)? {
+            if !st.reached_ok(self.env.graph, other)? {
                 continue;
             }
             let mut r = row.clone();
@@ -594,7 +707,7 @@ impl<'e, 'g> Matcher<'e, 'g> {
     ) -> Result<()> {
         let g = self.env.graph;
         let depth = trail.len() as u32;
-        if depth >= len.min && st.node_ok(g, cur)? {
+        if depth >= len.min && st.reached_ok(g, cur)? {
             let mut rels: Vec<Val> = trail.iter().map(|r| Val::Rel(*r)).collect();
             if self.pats[pi].reversed {
                 rels.reverse();
@@ -670,7 +783,7 @@ impl<'e, 'g> Matcher<'e, 'g> {
         if start_check.never() {
             return Ok(());
         }
-        for s in self.start_candidates(&p.start, &row)? {
+        for s in self.start_candidates(&p.start, None, &row)? {
             if !start_check.matches(g, s) {
                 continue;
             }
@@ -679,7 +792,7 @@ impl<'e, 'g> Matcher<'e, 'g> {
                 continue;
             }
             let Some(st) = StepCtx::new(self.env, rp, end, &r1)? else { return Ok(()) };
-            for e in self.start_candidates(end, &r1)? {
+            for e in self.start_candidates(end, None, &r1)? {
                 if !st.node_ok(g, e)? {
                     continue;
                 }
@@ -687,7 +800,7 @@ impl<'e, 'g> Matcher<'e, 'g> {
                 if !self.bind(&mut r2, &end.variable, Val::Node(e))? {
                     continue;
                 }
-                for (nodes, rels) in st.shortest(g, s, e, len, kind == Shortest::All, used) {
+                for (nodes, rels) in st.paths_between(g, s, e, len, kind == Shortest::All, p.weight.as_deref(), used)? {
                     let list = Val::List(rels.iter().map(|r| Val::Rel(*r)).collect());
                     if st.bound_rel.is_some_and(|b| *b != list) {
                         continue;
@@ -750,32 +863,40 @@ impl<'a> StepCtx<'a> {
 
     /// Like [`StepCtx::edges`], following `dir` instead of the pattern's direction.
     fn edges_towards(&self, g: &Graph, cur: NodeId, used: &[RelId], dir: Direction) -> Vec<(RelId, NodeId)> {
-        let Some(node) = g.node(cur) else { return Vec::new() };
         let mut out = Vec::new();
-        let mut consider = |rid: RelId, outgoing: bool| {
-            if used.contains(&rid) {
-                return;
-            }
-            let Some(r) = g.relationship(rid) else { return };
+        self.edges_into(g, cur, used, dir, &mut out);
+        out
+    }
+
+    /// Like [`StepCtx::edges_towards`], appending to `out` (searches reuse one
+    /// buffer instead of allocating per node).
+    fn edges_into(&self, g: &Graph, cur: NodeId, used: &[RelId], dir: Direction, out: &mut Vec<(RelId, NodeId)>) {
+        let Some(node) = g.node(cur) else { return };
+        let mut consider = |a: &Adjacent, outgoing: bool| {
             // a self-loop is already listed among the outgoing relationships
-            if !outgoing && dir == Direction::Both && r.start_node == r.end_node {
+            if !outgoing && dir == Direction::Both && a.other == cur {
                 return;
             }
-            if !self.types.is_empty() && !self.types.contains(&r.rel_type) {
+            if !self.types.is_empty() && !self.types.contains(&a.rel_type) {
                 return;
             }
-            if self.rel_props.as_ref().is_some_and(|m| !props_equal(m, &r.properties)) {
+            if used.contains(&a.rel) {
                 return;
             }
-            out.push((rid, if outgoing { r.end_node } else { r.start_node }));
+            if let Some(m) = &self.rel_props {
+                // only property filters need the relationship itself
+                if !g.relationship(a.rel).is_some_and(|r| props_equal(m, &r.properties)) {
+                    return;
+                }
+            }
+            out.push((a.rel, a.other));
         };
         if matches!(dir, Direction::Outgoing | Direction::Both) {
-            node.outgoing().iter().for_each(|r| consider(*r, true));
+            node.outgoing().iter().for_each(|a| consider(a, true));
         }
         if matches!(dir, Direction::Incoming | Direction::Both) {
-            node.incoming().iter().for_each(|r| consider(*r, false));
+            node.incoming().iter().for_each(|a| consider(a, false));
         }
-        out
     }
 
     /// Whether `n` can be the step's end node: the node pattern matches and,
@@ -790,137 +911,131 @@ impl<'a> StepCtx<'a> {
         Ok(self.node_check.matches(g, n))
     }
 
-    /// Breadth-first search from `s` to `e`. Returns one shortest path, or all
-    /// of them, as (nodes, relationships).
-    fn shortest(
+    /// [`StepCtx::node_ok`] for a node reached through an adjacency list (or
+    /// the path's already checked start node), which is known to exist: a
+    /// pattern without labels or properties then needs no lookup.
+    fn reached_ok(&self, g: &Graph, n: NodeId) -> Result<bool> {
+        if self.bound_node.is_none() && self.node_check.accepts_any() {
+            return Ok(true);
+        }
+        self.node_ok(g, n)
+    }
+
+    /// Shortest paths from `s` to `e`: by total `weight` when given (one
+    /// path), otherwise by number of relationships (one, or all when `all`).
+    /// Answers come from the graph's path cache when the search is fully
+    /// described by its key: no relationship property filter and no
+    /// relationship excluded by other patterns of the MATCH.
+    #[allow(clippy::too_many_arguments)]
+    fn paths_between(
         &self,
         g: &Graph,
         s: NodeId,
         e: NodeId,
         len: VarLength,
         all: bool,
+        weight: Option<&str>,
         used: &[RelId],
-    ) -> Vec<(Vec<NodeId>, Vec<RelId>)> {
+    ) -> Result<Vec<Path>> {
+        let key = (used.is_empty() && self.rel_props.is_none()).then(|| {
+            let mut types = self.types.clone();
+            types.sort_unstable();
+            types.dedup();
+            PathKey {
+                start: s,
+                end: e,
+                outgoing: matches!(self.rel.direction, Direction::Outgoing | Direction::Both),
+                incoming: matches!(self.rel.direction, Direction::Incoming | Direction::Both),
+                types,
+                min: len.min,
+                max: len.max,
+                all,
+                weight: weight.map(str::to_string),
+            }
+        });
+        if let Some(hit) = key.as_ref().and_then(|k| g.cached_paths(k)) {
+            return Ok(hit);
+        }
+        let found = match weight {
+            Some(w) => self.lightest(g, s, e, len, w, used)?,
+            None => self.shortest(g, s, e, len, all, used),
+        };
+        if let Some(k) = key {
+            g.cache_paths(k, found.clone());
+        }
+        Ok(found)
+    }
+
+    /// Shortest paths from `s` to `e` by number of relationships: one, or
+    /// all of them when `all`.
+    fn shortest(&self, g: &Graph, s: NodeId, e: NodeId, len: VarLength, all: bool, used: &[RelId]) -> Vec<Path> {
         if s == e {
             return if len.min == 0 { vec![(vec![s], Vec::new())] } else { Vec::new() };
         }
         let max = len.max.unwrap_or(u32::MAX);
-        if !all {
-            return self.bidirectional(g, s, e, max, used).into_iter().collect();
+        if all {
+            return paths::breadth_first(s, e, max, true, |u, out| {
+                self.edges_into(g, u, used, self.rel.direction, out)
+            });
         }
-        // node -> (depth, [(relationship, parent)])
-        let mut seen: HashMap<NodeId, (u32, Vec<(RelId, NodeId)>)> = HashMap::from([(s, (0, Vec::new()))]);
-        let mut frontier = vec![s];
-        let mut depth = 0;
-        while !frontier.is_empty() && depth < max && !seen.contains_key(&e) {
-            depth += 1;
-            let mut next = Vec::new();
-            for u in frontier {
-                for (rid, v) in self.edges(g, u, used) {
-                    match seen.get_mut(&v) {
-                        None => {
-                            seen.insert(v, (depth, vec![(rid, u)]));
-                            next.push(v);
-                        }
-                        Some((d, parents)) if *d == depth && all => parents.push((rid, u)),
-                        Some(_) => {}
-                    }
-                }
-            }
-            frontier = next;
-        }
-        if !seen.contains_key(&e) {
-            return Vec::new();
-        }
-        // walk the parent links back from `e`
-        let mut paths = Vec::new();
-        let mut stack: Vec<(NodeId, Vec<NodeId>, Vec<RelId>)> = vec![(e, vec![e], Vec::new())];
-        while let Some((n, nodes, rels)) = stack.pop() {
-            if n == s {
-                let (mut nodes, mut rels) = (nodes, rels);
-                nodes.reverse();
-                rels.reverse();
-                paths.push((nodes, rels));
-                if !all {
-                    break;
-                }
-                continue;
-            }
-            let parents = &seen[&n].1;
-            let take = if all { parents.len() } else { 1 };
-            // push in reverse so paths come out in adjacency order
-            for (rid, parent) in parents[..take].iter().rev() {
-                let (mut ns, mut rs) = (nodes.clone(), rels.clone());
-                ns.push(*parent);
-                rs.push(*rid);
-                stack.push((*parent, ns, rs));
-            }
-        }
-        paths
+        let dirs = [self.rel.direction, flip(self.rel.direction)];
+        paths::bidirectional_bfs(s, e, max, |u, backward, out| {
+            self.edges_into(g, u, used, dirs[usize::from(backward)], out)
+        })
+        .into_iter()
+        .collect()
     }
 
-    /// One shortest path, searching from both ends and always growing the
-    /// smaller frontier by a full level. Visits far fewer nodes than a
-    /// one-sided search on large graphs.
-    fn bidirectional(
+    /// The path from `s` to `e` whose relationships have the smallest sum
+    /// of the `weight` property. Every relationship the search follows must
+    /// have a non-negative number there, otherwise the query fails.
+    fn lightest(
         &self,
         g: &Graph,
         s: NodeId,
         e: NodeId,
-        max: u32,
+        len: VarLength,
+        weight: &str,
         used: &[RelId],
-    ) -> Option<(Vec<NodeId>, Vec<RelId>)> {
-        // node -> (relationship, neighbour one step closer to that side's root)
-        let mut seen: [HashMap<NodeId, Option<(RelId, NodeId)>>; 2] =
-            [HashMap::from([(s, None)]), HashMap::from([(e, None)])];
-        let mut frontier = [vec![s], vec![e]];
-        let dirs = [self.rel.direction, flip(self.rel.direction)];
-        let mut depth = 0u32;
-        while depth < max && !frontier[0].is_empty() && !frontier[1].is_empty() {
-            let side = usize::from(frontier[1].len() < frontier[0].len());
-            let mut next = Vec::new();
-            let mut meet: Option<NodeId> = None;
-            for u in std::mem::take(&mut frontier[side]) {
-                for (rid, v) in self.edges_towards(g, u, used, dirs[side]) {
-                    if seen[side].contains_key(&v) {
-                        continue;
-                    }
-                    seen[side].insert(v, Some((rid, u)));
-                    if meet.is_none() && seen[1 - side].contains_key(&v) {
-                        // the sides were disjoint before this level, so any
-                        // meeting node on it gives the same total length
-                        meet = Some(v);
-                    }
-                    next.push(v);
-                }
-                if meet.is_some() {
-                    break;
-                }
-            }
-            depth += 1;
-            if let Some(m) = meet {
-                let walk = |side: usize| {
-                    let (mut nodes, mut rels, mut cur) = (Vec::new(), Vec::new(), m);
-                    while let Some(Some((rid, prev))) = seen[side].get(&cur) {
-                        rels.push(*rid);
-                        nodes.push(*prev);
-                        cur = *prev;
-                    }
-                    (nodes, rels)
-                };
-                let (mut nodes, mut rels) = walk(0);
-                nodes.reverse();
-                rels.reverse();
-                nodes.push(m);
-                let (tail_nodes, tail_rels) = walk(1);
-                nodes.extend(tail_nodes);
-                rels.extend(tail_rels);
-                return Some((nodes, rels));
-            }
-            frontier[side] = next;
+    ) -> Result<Vec<Path>> {
+        if s == e {
+            return Ok(if len.min == 0 { vec![(vec![s], Vec::new())] } else { Vec::new() });
         }
-        None
+        let dirs = [self.rel.direction, flip(self.rel.direction)];
+        let mut plain = Vec::new();
+        let found = paths::bidirectional_dijkstra(s, e, |u, backward, out| {
+            plain.clear();
+            self.edges_into(g, u, used, dirs[usize::from(backward)], &mut plain);
+            for &(rid, v) in &plain {
+                out.push((rid, v, rel_weight(g, rid, weight)?));
+            }
+            Ok(())
+        })?;
+        Ok(found.map(|(path, _cost)| path).into_iter().collect())
     }
+}
+
+/// The weight of relationship `rid` for a weighted shortest path: its `key`
+/// property, which must be a non-negative number.
+fn rel_weight(g: &Graph, rid: RelId, key: &str) -> Result<f64> {
+    let value = g.relationship(rid).and_then(|r| r.properties.get(key));
+    let w = match value {
+        Some(Value::Integer(i)) => *i as f64,
+        Some(Value::Float(f)) => *f,
+        Some(other) => {
+            return Err(type_err(format!(
+                "shortestPath weight `{key}` of relationship {rid} must be a number, got {}",
+                other.type_name()
+            )))
+        }
+        None => return Err(type_err(format!("relationship {rid} has no shortestPath weight `{key}`"))),
+    };
+    if w.is_nan() || w < 0.0 || w.is_infinite() {
+        return Err(type_err(format!(
+            "shortestPath weight `{key}` of relationship {rid} must be non-negative, got {w}"
+        )));
+    }
+    Ok(w)
 }
 
 fn eval_props(env: &Env<'_>, expr: &Option<Expr>, row: &Row) -> Result<Option<BTreeMap<String, Val>>> {
@@ -962,6 +1077,11 @@ impl NodeCheck {
 
     fn never(&self) -> bool {
         self.labels.is_none()
+    }
+
+    /// No labels and no properties: every existing node matches.
+    fn accepts_any(&self) -> bool {
+        self.labels.as_ref().is_some_and(Vec::is_empty) && self.props.is_none()
     }
 
     fn matches(&self, g: &Graph, nid: NodeId) -> bool {

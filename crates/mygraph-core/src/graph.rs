@@ -4,9 +4,11 @@
 //! returns its inverse. The same `Change` records serve as redo entries for the
 //! WAL and as undo entries for rollback.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::error::{MyGraphError, Result};
+use crate::path_cache::{CachedPaths, PathCache, PathKey, SharedPathCache};
 use crate::value::{NodeValue, PropertyMap, RelationshipValue, Value};
 
 pub type NodeId = u64;
@@ -14,6 +16,37 @@ pub type RelId = u64;
 pub type LabelId = u32;
 pub type RelTypeId = u32;
 pub type SchemaId = u32;
+
+/// Hasher for integer ids. Ids are allocated sequentially, so a single
+/// multiplication spreads them well and is far cheaper than SipHash. Not
+/// meant for keys an attacker chooses.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ u64::from(*b)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn write_u32(&mut self, n: u32) {
+        self.write_u64(u64::from(n));
+    }
+}
+
+/// A hash map keyed by node or relationship ids.
+pub type IdMap<K, V> = HashMap<K, V, BuildHasherDefault<IdHasher>>;
+/// A hash set of node or relationship ids.
+pub type IdSet<K> = HashSet<K, BuildHasherDefault<IdHasher>>;
 
 /// Maps label / relationship-type names to compact ids.
 #[derive(Debug, Clone, Default)]
@@ -50,16 +83,29 @@ pub struct Node {
     pub properties: PropertyMap,
     pub created_at: u64,
     pub updated_at: u64,
-    outgoing: Vec<RelId>,
-    incoming: Vec<RelId>,
+    outgoing: Vec<Adjacent>,
+    incoming: Vec<Adjacent>,
+}
+
+/// One entry of a node's adjacency list. It repeats the relationship's type
+/// and the node at its other end, so traversals can filter by type and move
+/// to the neighbour without looking the relationship up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Adjacent {
+    pub rel: RelId,
+    /// The node at the other end (the node itself for a self-loop).
+    pub other: NodeId,
+    pub rel_type: RelTypeId,
 }
 
 impl Node {
-    pub fn outgoing(&self) -> &[RelId] {
+    /// Relationships starting at this node, in creation order.
+    pub fn outgoing(&self) -> &[Adjacent] {
         &self.outgoing
     }
 
-    pub fn incoming(&self) -> &[RelId] {
+    /// Relationships ending at this node, in creation order.
+    pub fn incoming(&self) -> &[Adjacent] {
         &self.incoming
     }
 
@@ -208,13 +254,17 @@ pub struct IndexInfo {
 #[derive(Debug, Clone)]
 pub struct Graph {
     schema_id: SchemaId,
-    nodes: BTreeMap<NodeId, Node>,
-    relationships: BTreeMap<RelId, Relationship>,
+    nodes: IdMap<NodeId, Node>,
+    relationships: IdMap<RelId, Relationship>,
     labels: Interner,
     rel_types: Interner,
     label_index: HashMap<LabelId, BTreeSet<NodeId>>,
+    /// Relationship ids by type (automatic, like the label index).
+    rel_type_index: HashMap<RelTypeId, BTreeSet<RelId>>,
     /// Property indexes, grouped by label so node changes find theirs quickly.
     prop_index: HashMap<LabelId, BTreeMap<String, PropIndex>>,
+    /// Results of shortest-path searches, kept valid by [`Graph::apply`].
+    path_cache: SharedPathCache,
 }
 
 fn node_not_found(id: NodeId) -> MyGraphError {
@@ -260,13 +310,44 @@ impl Graph {
     pub fn new(schema_id: SchemaId) -> Self {
         Graph {
             schema_id,
-            nodes: BTreeMap::new(),
-            relationships: BTreeMap::new(),
+            nodes: IdMap::default(),
+            relationships: IdMap::default(),
             labels: Interner::default(),
             rel_types: Interner::default(),
             label_index: HashMap::new(),
+            rel_type_index: HashMap::new(),
             prop_index: HashMap::new(),
+            path_cache: SharedPathCache::default(),
         }
+    }
+
+    /// The cached answer to a shortest-path search, if still valid.
+    pub fn cached_paths(&self, key: &PathKey) -> Option<CachedPaths> {
+        self.path_cache.lock().get(key)
+    }
+
+    /// Caches the answer to a shortest-path search run against this graph
+    /// as it is now. Callers must only cache searches fully described by
+    /// `key` (no relationship property filters, no excluded relationships).
+    pub fn cache_paths(&self, key: PathKey, paths: CachedPaths) {
+        self.path_cache.lock().insert(key, paths);
+    }
+
+    /// Maximum number of cached shortest-path searches; 0 disables the cache.
+    /// Takes `&self` so read-only queries can apply the configured size.
+    pub fn set_path_cache_capacity(&self, entries: usize) {
+        self.path_cache.set_capacity(entries);
+    }
+
+    /// (entries, hits, misses) of the shortest-path cache.
+    pub fn path_cache_stats(&self) -> (usize, u64, u64) {
+        let c = self.path_cache.lock();
+        let (hits, misses) = c.stats();
+        (c.len(), hits, misses)
+    }
+
+    fn path_cache(&mut self) -> &mut PathCache {
+        self.path_cache.get_mut()
     }
 
     pub fn schema_id(&self) -> SchemaId {
@@ -281,12 +362,19 @@ impl Graph {
         self.relationships.get(&id)
     }
 
+    /// Every node, in id order. Sorts, so O(n log n): for scans and snapshots.
     pub fn nodes(&self) -> impl Iterator<Item = &Node> + '_ {
-        self.nodes.values()
+        let mut all: Vec<&Node> = self.nodes.values().collect();
+        all.sort_unstable_by_key(|n| n.id);
+        all.into_iter()
     }
 
+    /// Every relationship, in id order. Sorts, so O(n log n): for scans and
+    /// snapshots (replaying them in id order rebuilds the same adjacency).
     pub fn relationships(&self) -> impl Iterator<Item = &Relationship> + '_ {
-        self.relationships.values()
+        let mut all: Vec<&Relationship> = self.relationships.values().collect();
+        all.sort_unstable_by_key(|r| r.id);
+        all.into_iter()
     }
 
     pub fn node_count(&self) -> usize {
@@ -327,6 +415,16 @@ impl Graph {
         self.labels.get(label).and_then(|l| self.label_index.get(&l)).map_or(0, BTreeSet::len)
     }
 
+    /// Ids of the relationships of type `rel_type`, in ascending order.
+    pub fn relationship_ids_with_type(&self, rel_type: &str) -> impl Iterator<Item = RelId> + '_ {
+        self.rel_types.get(rel_type).and_then(|t| self.rel_type_index.get(&t)).into_iter().flatten().copied()
+    }
+
+    /// Number of relationships of type `rel_type`.
+    pub fn rel_type_count(&self, rel_type: &str) -> usize {
+        self.rel_types.get(rel_type).and_then(|t| self.rel_type_index.get(&t)).map_or(0, BTreeSet::len)
+    }
+
     pub fn has_index(&self, label: &str, key: &str) -> bool {
         self.labels.get(label).and_then(|l| self.prop_index.get(&l)).is_some_and(|m| m.contains_key(key))
     }
@@ -349,6 +447,23 @@ impl Graph {
         }
         let k = IndexKey::from_value(value)?;
         Some(idx.entries.get(&k).map(|s| s.iter().copied().collect()).unwrap_or_default())
+    }
+
+    /// How many ids [`Graph::nodes_by_property`] would return, without
+    /// collecting them. `None` in the same cases.
+    pub fn count_by_property(&self, label: &str, key: &str, value: &Value) -> Option<usize> {
+        let idx = self.labels.get(label).and_then(|l| self.prop_index.get(&l)).and_then(|m| m.get(key))?;
+        if value.is_null() {
+            return Some(0);
+        }
+        const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53, see nodes_by_property
+        match value {
+            Value::Integer(i) if (*i as f64).abs() > EXACT => return None,
+            Value::Float(f) if f.abs() >= EXACT => return None,
+            _ => {}
+        }
+        let k = IndexKey::from_value(value)?;
+        Some(idx.entries.get(&k).map_or(0, BTreeSet::len))
     }
 
     /// Every property index, ordered by label then key.
@@ -487,8 +602,11 @@ impl Graph {
                 }
                 let properties = clean_properties(properties)?;
                 let type_id = self.rel_types.intern(rel_type);
-                self.nodes.get_mut(start).expect("checked").outgoing.push(*id);
-                self.nodes.get_mut(end).expect("checked").incoming.push(*id);
+                let adj = |other| Adjacent { rel: *id, other, rel_type: type_id };
+                self.nodes.get_mut(start).expect("checked").outgoing.push(adj(*end));
+                self.nodes.get_mut(end).expect("checked").incoming.push(adj(*start));
+                self.rel_type_index.entry(type_id).or_default().insert(*id);
+                self.path_cache().relationship_created(type_id);
                 self.relationships.insert(
                     *id,
                     Relationship {
@@ -505,11 +623,15 @@ impl Graph {
             Change::DeleteRelationship { id } => {
                 let rel = self.relationships.remove(id).ok_or_else(|| rel_not_found(*id))?;
                 if let Some(n) = self.nodes.get_mut(&rel.start_node) {
-                    n.outgoing.retain(|r| r != id);
+                    n.outgoing.retain(|a| a.rel != *id);
                 }
                 if let Some(n) = self.nodes.get_mut(&rel.end_node) {
-                    n.incoming.retain(|r| r != id);
+                    n.incoming.retain(|a| a.rel != *id);
                 }
+                if let Some(set) = self.rel_type_index.get_mut(&rel.rel_type) {
+                    set.remove(id);
+                }
+                self.path_cache().relationship_deleted(*id);
                 Ok(Some(Change::CreateRelationship {
                     id: *id,
                     start: rel.start_node,
@@ -541,10 +663,12 @@ impl Graph {
             Change::SetRelationshipProperty { id, key, value } => {
                 let value = normalize_value(key, value)?;
                 let rel = self.relationships.get_mut(id).ok_or_else(|| rel_not_found(*id))?;
-                let old = match value {
-                    Some(v) => rel.properties.insert(key.clone(), v),
+                let old = match &value {
+                    Some(v) => rel.properties.insert(key.clone(), v.clone()),
                     None => rel.properties.remove(key),
                 };
+                let rel_type = rel.rel_type;
+                self.path_cache.get_mut().relationship_property_set(*id, rel_type, key, old.as_ref(), value.as_ref());
                 Ok(Some(Change::SetRelationshipProperty { id: *id, key: key.clone(), value: old }))
             }
             Change::AddLabel { id, label, ts } => {
@@ -630,7 +754,11 @@ mod tests {
             properties: PropertyMap::new(),
         };
         undo.push(g.apply(&rel).unwrap().unwrap());
-        assert_eq!(g.node(1).unwrap().outgoing(), &[7]);
+        let adj = Adjacent { rel: 7, other: 2, rel_type: g.rel_type_id("KNOWS").unwrap() };
+        assert_eq!(g.node(1).unwrap().outgoing(), &[adj]);
+        assert_eq!(g.node(2).unwrap().incoming(), &[Adjacent { other: 1, ..adj }]);
+        assert_eq!(g.relationship_ids_with_type("KNOWS").collect::<Vec<_>>(), vec![7]);
+        assert_eq!(g.rel_type_count("KNOWS"), 1);
         assert_eq!(g.node_ids_with_label("User"), vec![1, 2]);
         assert!(g.apply(&Change::DeleteNode { id: 1 }).is_err());
 
@@ -640,6 +768,7 @@ mod tests {
         assert_eq!(g.node_count(), 0);
         assert_eq!(g.relationship_count(), 0);
         assert!(g.node_ids_with_label("User").is_empty());
+        assert_eq!(g.rel_type_count("KNOWS"), 0);
     }
 
     #[test]

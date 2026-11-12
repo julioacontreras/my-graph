@@ -8,6 +8,7 @@
 mod eval;
 mod functions;
 mod matcher;
+mod paths;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::AddAssign;
@@ -57,10 +58,43 @@ pub struct ExecResult {
 /// Runs a query against one schema graph. All changes go through `ctx`, so the
 /// caller can commit or roll them back.
 pub fn execute(query: &Query, ctx: &mut WriteContext<'_>, params: &BTreeMap<String, Value>) -> Result<ExecResult> {
+    run(query, &mut Target::Write(ctx), params)
+}
+
+/// Runs a read-only query (see [`Query::is_read_only`]) against a shared
+/// graph, so several can run at once. A writing query is an error.
+pub fn execute_read(query: &Query, graph: &Graph, params: &BTreeMap<String, Value>) -> Result<ExecResult> {
+    run(query, &mut Target::Read(graph), params)
+}
+
+fn run(query: &Query, target: &mut Target<'_, '_>, params: &BTreeMap<String, Value>) -> Result<ExecResult> {
     crate::semantic::check_query(query)?;
     let params: BTreeMap<String, Val> = params.iter().map(|(k, v)| (k.clone(), Val::from_value(v))).collect();
     let mut exec = Executor { params: &params, stats: QueryStats::default() };
-    exec.run(query, ctx)
+    exec.run(query, target)
+}
+
+/// What a query runs against: a shared graph it may only read, or a write
+/// context that journals its changes.
+enum Target<'a, 'w> {
+    Read(&'a Graph),
+    Write(&'a mut WriteContext<'w>),
+}
+
+impl<'w> Target<'_, 'w> {
+    fn graph(&self) -> &Graph {
+        match self {
+            Target::Read(g) => g,
+            Target::Write(ctx) => ctx.graph(),
+        }
+    }
+
+    fn writer(&mut self) -> Result<&mut WriteContext<'w>> {
+        match self {
+            Target::Read(_) => Err(MyGraphError::Execution("this query writes, but runs in read-only mode".into())),
+            Target::Write(ctx) => Ok(ctx),
+        }
+    }
 }
 
 struct Executor<'p> {
@@ -94,15 +128,16 @@ impl Executor<'_> {
         Env { graph, params: self.params }
     }
 
-    fn run(&mut self, q: &Query, ctx: &mut WriteContext<'_>) -> Result<ExecResult> {
+    fn run(&mut self, q: &Query, target: &mut Target<'_, '_>) -> Result<ExecResult> {
         let mut rows: Vec<Row> = vec![Row::new()];
         let mut out = ExecResult::default();
         for clause in &q.clauses {
             rows = match clause {
                 Clause::Match { optional, patterns, filter } => {
-                    self.do_match(ctx.graph(), rows, *optional, patterns, filter.as_ref())?
+                    self.do_match(target.graph(), rows, *optional, patterns, filter.as_ref())?
                 }
                 Clause::Create { patterns } => {
+                    let ctx = target.writer()?;
                     for row in rows.iter_mut() {
                         for p in patterns {
                             self.create_path(ctx, row, p)?;
@@ -111,23 +146,25 @@ impl Executor<'_> {
                     rows
                 }
                 Clause::Set { items } => {
+                    let ctx = target.writer()?;
                     for row in &rows {
                         self.do_set(ctx, row, items)?;
                     }
                     rows
                 }
                 Clause::Remove { items } => {
+                    let ctx = target.writer()?;
                     for row in &rows {
                         self.do_remove(ctx, row, items)?;
                     }
                     rows
                 }
                 Clause::Delete { detach, exprs } => {
-                    self.do_delete(ctx, &rows, *detach, exprs)?;
+                    self.do_delete(target.writer()?, &rows, *detach, exprs)?;
                     rows
                 }
                 Clause::Unwind { expr, variable } => {
-                    let env = self.env(ctx.graph());
+                    let env = self.env(target.graph());
                     let mut out = Vec::new();
                     for row in rows {
                         match env.eval(expr, &row)? {
@@ -149,15 +186,15 @@ impl Executor<'_> {
                     out
                 }
                 Clause::With { projection, filter } => {
-                    let (_, projected) = self.project(ctx.graph(), rows, projection)?;
+                    let (_, projected) = self.project(target.graph(), rows, projection)?;
                     match filter {
-                        Some(f) => filter_rows(&self.env(ctx.graph()), projected, f)?,
+                        Some(f) => filter_rows(&self.env(target.graph()), projected, f)?,
                         None => projected,
                     }
                 }
                 Clause::Return(projection) => {
-                    let (columns, projected) = self.project(ctx.graph(), rows, projection)?;
-                    let g = ctx.graph();
+                    let (columns, projected) = self.project(target.graph(), rows, projection)?;
+                    let g = target.graph();
                     out.rows = projected
                         .iter()
                         .map(|row| columns.iter().map(|c| row[c].materialize(g)).collect::<Result<Vec<_>>>())
@@ -399,8 +436,8 @@ impl Executor<'_> {
             if detach {
                 for n in &nodes {
                     if let Some(node) = env.graph.node(*n) {
-                        rels.extend(node.outgoing().iter().copied());
-                        rels.extend(node.incoming().iter().copied());
+                        rels.extend(node.outgoing().iter().map(|a| a.rel));
+                        rels.extend(node.incoming().iter().map(|a| a.rel));
                     }
                 }
             }

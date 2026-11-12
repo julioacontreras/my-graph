@@ -298,7 +298,9 @@ per record.
   `id(n)` to match them: `MATCH (n) WHERE id(n) = 0 RETURN n`.
 - Property indexes are **not** created automatically. See
   [Indexes](#indexes-you-create-them).
-- An open transaction blocks all other connections. Keep it short.
+- Scripts that only read (no `CREATE`, `SET`, `REMOVE` or `DELETE`) run at
+  the same time as each other; anything that writes runs alone. An open
+  transaction blocks all other connections. Keep it short.
 
 ### Cypher examples
 
@@ -325,6 +327,10 @@ MATCH p = (a:User {name: 'Alice'})-[r:KNOWS*]->(b) RETURN b.name, length(p), siz
 // Shortest paths between bound nodes (WHERE is checked after the search)
 MATCH (a:User {name: 'Alice'}), (b:User {name: 'Dave'}), p = shortestPath((a)-[:KNOWS*..10]-(b))
 RETURN length(p) AS hops, nodes(p) AS people
+
+// Lightest path: the smallest sum of a relationship property (see Shortest paths)
+MATCH (a:City {name: 'Madrid'}), (b:City {name: 'Lisboa'}), p = shortestPath((a)-[:ROAD*]-(b), {weight: 'km'})
+UNWIND relationships(p) AS r RETURN length(p) AS legs, sum(r.km) AS km
 
 // Aggregate
 MATCH (u:User) RETURN count(u) AS users, avg(u.age) AS avg_age, collect(u.name) AS names
@@ -379,7 +385,10 @@ Identifiers with spaces or reserved words go in backticks: `` `my label` ``.
 
 - The label index: `MATCH (n:User)` only visits `:User` nodes.
 - Lookups by id: `MATCH (n) WHERE id(n) = $id` (or `id(n) IN $ids`) goes
-  straight to the node.
+  straight to the node, and `MATCH (a)-[r]->(b) WHERE id(r) = $id` straight
+  to the relationship.
+- The relationship type index: `MATCH (a)-[:RARE]->(b)` starts from the
+  `:RARE` relationships when they are fewer than the nodes it would scan.
 - The query planner: each pattern starts from its most selective node (a
   variable that is already bound, then `id()`, then an index, then the
   label with the fewest nodes), and every `WHERE` condition joined by `AND`
@@ -421,6 +430,33 @@ are the same key). Lists and maps are not indexed. A lookup with one of them
 falls back to a scan, and so does a lookup with an integer beyond ±2^53.
 Results are the same with or without an index, only the speed changes.
 
+### Shortest paths
+
+`shortestPath((a)-[*]->(b))` finds a path with the fewest relationships,
+searching from both ends at once. Add `{weight: 'property'}` to find the
+path with the smallest sum of that relationship property instead
+(bidirectional Dijkstra):
+
+```cypher
+MATCH (a:Stop {id: $from}), (b:Stop {id: $to}), p = shortestPath((a)-[:LINK*]->(b), {weight: 'minutes'})
+UNWIND relationships(p) AS r RETURN nodes(p) AS stops, sum(r.minutes) AS minutes
+```
+
+- Weights must be non-negative numbers. A relationship the search reaches
+  with a missing, negative or non-numeric weight makes the query fail.
+- A weighted search needs a relationship of any length (`-[*]->`, `-[:T*]-`):
+  a maximum length (`*..5`) and `allShortestPaths` are not supported with a
+  weight yet.
+- When several paths are equally short, any of them may be returned.
+
+Answers are cached per schema (10,000 searches by default;
+`Config::default().path_cache_entries(n)`, 0 turns the cache off). A cached
+answer is dropped as soon as a change could affect it: a new relationship
+of a type the search follows, a deleted relationship on the path, a heavier
+weight on the path, or a lighter (or missing, or invalid) weight anywhere.
+Other changes keep it, so repeated searches stay fast while the graph is
+being updated, and results are always the same as without the cache.
+
 ## Status
 
 Current version: **v0.2**.
@@ -430,8 +466,9 @@ Current version: **v0.2**.
 | Model | Directed property graph: nodes with multiple labels, typed relationships, properties (`null`, bool, int, float, string, bytes, list, map) |
 | Databases / schemas | Multiple databases with isolated schemas; `CREATE/DROP/USE DATABASE`, `CREATE/DROP/USE SCHEMA`, `SHOW DATABASES/SCHEMAS` |
 | Cypher | `MATCH`, `OPTIONAL MATCH`, `WHERE`, variable-length relationships (`-[:T*1..5]->`), named paths (`p = ...`), `shortestPath` / `allShortestPaths`, `CREATE`, `SET` (`=`, `+=`, labels), `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` (`DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`), `count/sum/avg/min/max/collect`, `CASE`, parameters, scalar functions; errors carry line/column |
-| Indexes and planning | Label index; property equality indexes (`CREATE INDEX FOR (n:L) ON (n.p)` or `CREATE INDEX ON :L(p)`, `DROP INDEX`, `SHOW INDEXES`), used by inline properties, `WHERE n.p = x` and `IN`; `id(n) = x` lookups; each path starts from its most selective node and `WHERE` is checked as soon as its variables are bound |
-| Transactions | Auto-commit per statement; explicit transactions with commit/rollback (rollback on drop); statement-level atomicity |
+| Indexes and planning | Label and relationship-type indexes; property equality indexes (`CREATE INDEX FOR (n:L) ON (n.p)` or `CREATE INDEX ON :L(p)`, `DROP INDEX`, `SHOW INDEXES`), used by inline properties, `WHERE n.p = x` and `IN`; `id(n) = x` and `id(r) = x` lookups; each path starts from its most selective node or relationship and `WHERE` is checked as soon as its variables are bound |
+| Paths | Bidirectional breadth-first `shortestPath`, weighted `shortestPath(..., {weight: 'p'})` (bidirectional Dijkstra), `allShortestPaths`; per-schema cache of path searches with change-based invalidation |
+| Transactions | Auto-commit per statement; explicit transactions with commit/rollback (rollback on drop); statement-level atomicity; read-only scripts run concurrently |
 | Storage | WAL (CRC32, fsync on commit) + snapshot checkpoints, crash recovery, torn-write detection, exclusive directory lock |
 | API | Embedded `Database::in_memory()` / `Database::open(path_or_config)`, `params!` |
 | CLI | `mygraph shell` / `mygraph query`, embedded or connected to a server |
@@ -521,16 +558,17 @@ inverted, the undo log used for rollback.
   full snapshots, not in pages with a buffer pool. The `Store`
   API is designed so the page-based store can replace it in Phase 3.
   `cache_size_mb` is accepted but has no effect yet.
-- **Concurrency:** statements are serialized. An explicit transaction holds
-  exclusive access until it commits or rolls back. MVCC is Phase 5.
+- **Concurrency:** one reader-writer lock per instance. Read-only scripts
+  share it, so each sees a consistent graph; scripts that write, DDL and
+  explicit transactions hold it alone until they finish. MVCC is Phase 5.
 - **Checkpoints** happen when the WAL reaches a size threshold (default
   64 MiB), when `checkpoint()` is called, and on close. They are not time-based
   yet.
 - **`Value::Map`** uses `BTreeMap` (not `HashMap`) so iteration order and the
   binary encoding are deterministic.
 - **Server:** one OS thread per connection over `std::net`, not Tokio.
-  Statements are serialized anyway in v0.1. Tokio can come
-  with concurrent execution. Each connection gets its own `Session`
+  Read-only statements from different connections run in parallel; writes
+  are serialized. Each connection gets its own `Session`
   (`Database::session()`), so `USE DATABASE` does not leak between clients.
 - **Leniency:** clauses may follow `CREATE` without a `WITH` in between.
 
