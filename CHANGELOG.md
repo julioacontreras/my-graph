@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.3.0
+
+Faster searches and weighted shortest paths, following the search engine
+plan in `docs/seacrh.md`.
+
+### Added
+
+- Weighted shortest paths: `shortestPath((a)-[*]->(b), {weight: 'cost'})`
+  finds the path with the smallest sum of a relationship property
+  (bidirectional Dijkstra). Weights must be non-negative numbers; a weight
+  needs `*` without a maximum, and is not supported with `allShortestPaths`.
+- A per-schema cache of shortest-path searches
+  (`Config::path_cache_entries`, default 10,000, 0 disables it). An answer
+  is dropped only when a change could affect it, so it stays useful while
+  the graph is updated.
+- Relationship lookups: `MATCH (a)-[r]->(b) WHERE id(r) = $id` (or `IN`, or
+  an already bound `r`) goes straight to the relationship instead of
+  scanning every node (137 ms → 0.007 ms at 200k relationships). The Python
+  client's relationship helpers use this pattern.
+- An automatic relationship-type index: `MATCH (a)-[:RARE]->(b)` starts
+  from those relationships when they are fewer than the nodes to scan.
+- Read-only scripts (no `CREATE`, `SET`, `REMOVE`, `DELETE`) run
+  concurrently, embedded and in the server; writes still run one at a time.
+- The benchmark (`examples/bench.rs`) reports p50/p95/p99, random pairs,
+  updates per second and concurrent readers.
+
+### Changed
+
+- Unweighted `shortestPath` between random pairs: 0.47 ms → 0.15 ms
+  (100k nodes). Adjacency lists carry the relationship type and neighbour,
+  and nodes and relationships are stored in hash maps keyed by id.
+- About 7% more memory per graph for the richer adjacency lists.
+
+### Upgrade notes
+
+- The snapshot and protocol formats are unchanged: 0.3 and 0.2 read each
+  other's data, and the Python client 0.2 works with this server.
+
 ## 0.2.0
 
 Search performance and traversals, following the graph database benchmark

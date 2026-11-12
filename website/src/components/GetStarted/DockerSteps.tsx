@@ -109,8 +109,9 @@ export function DockerSteps() {
             port 6660 to the internet: bind it to localhost (<code className="inline-code">-p 127.0.0.1:6660:6660</code>)
             or keep it on a private network.
           </Callout>
-          <Callout title="Upgrading from 0.1.">
-            0.2 reads 0.1 data; 0.1 cannot read data written by 0.2. Back up the volume before upgrading.{" "}
+          <Callout title="Upgrading.">
+            0.3 reads 0.2 and 0.1 data, and 0.2 reads 0.3 data. 0.1 cannot read data written by 0.2 or later. Back
+            up the volume before upgrading.{" "}
             <a className="link" href={links.changelog}>Changelog</a>
           </Callout>
         </div>

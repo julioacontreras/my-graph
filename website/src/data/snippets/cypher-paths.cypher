@@ -6,3 +6,8 @@ RETURN DISTINCT p.name AS program
 MATCH (a:Job {name: 'nightly'}), (b:Table {name: 'orders'}),
       p = shortestPath((a)-[*..10]-(b))
 RETURN length(p) AS hops, nodes(p) AS steps
+
+// Lightest path: the smallest sum of a relationship property
+MATCH (a:Job {name: 'nightly'}), (b:Table {name: 'orders'}),
+      p = shortestPath((a)-[*]-(b), {weight: 'cost'})
+UNWIND relationships(p) AS r RETURN length(p) AS hops, sum(r.cost) AS cost

@@ -374,7 +374,7 @@ Identifiers with spaces or reserved words go in backticks: `` `my label` ``.
 | Other | `length`, `timestamp` |
 
 > [!WARNING]
-> **Not supported in v0.2:** `MERGE` and regular expressions (`=~`) fail
+> **Not supported in v0.3:** `MERGE` and regular expressions (`=~`) fail
 > with `syntax error ... not supported yet`. Constraints, composite indexes
 > and `CALL` / procedures fail with an ordinary syntax error. To do an
 > upsert, run `MATCH` first and `CREATE` only when it returns no rows.
@@ -459,7 +459,7 @@ being updated, and results are always the same as without the cache.
 
 ## Status
 
-Current version: **v0.2**.
+Current version: **v0.3**.
 
 | Area | Implemented |
 |---|---|

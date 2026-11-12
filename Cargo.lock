@@ -64,7 +64,7 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
 name = "mygraph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mygraph-core",
  "mygraph-cypher",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "mygraph-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mygraph",
  "mygraph-protocol",
@@ -82,28 +82,28 @@ dependencies = [
 
 [[package]]
 name = "mygraph-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "mygraph-cypher"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mygraph-core",
 ]
 
 [[package]]
 name = "mygraph-protocol"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mygraph-core",
 ]
 
 [[package]]
 name = "mygraph-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "mygraph",
  "mygraph-protocol",
@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "mygraph-storage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crc32fast",
  "mygraph-core",

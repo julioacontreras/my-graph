@@ -3,7 +3,7 @@ import { Section } from "./ui/Section";
 
 const ROWS: [string, string][] = [
   ["Graphs that fit in RAM", "Graphs larger than memory (no page-based storage)"],
-  ["One writer at a time", "Many concurrent writers (no MVCC)"],
+  ["Many concurrent readers, one writer at a time", "Many concurrent writers (no MVCC)"],
   ["Trusted networks, local or embedded use", "Authentication or TLS (AUTH is accepted but not checked)"],
   ["Cypher reads, writes and paths", "MERGE, UNION, constraints, procedures, regex"],
   ["Equality lookups by property", "Range or composite indexes"],

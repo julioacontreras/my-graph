@@ -9,8 +9,8 @@ const PROPS = [
       <>
         <code className="inline-code">MATCH</code>, <code className="inline-code">OPTIONAL MATCH</code>,{" "}
         <code className="inline-code">WITH</code>, <code className="inline-code">UNWIND</code>, aggregations,
-        variable-length paths and <code className="inline-code">shortestPath</code>. Index syntax from both Neo4j and
-        Memgraph.
+        variable-length paths and <code className="inline-code">shortestPath</code>, by hops or by a weight
+        property. Index syntax from both Neo4j and Memgraph.
       </>
     ),
     href: links.cypher,
@@ -32,7 +32,7 @@ const PROPS = [
   },
   {
     title: "Light on memory.",
-    body: "Rust, no garbage collector, no heap to size. 280 MB with 100k relationships in our benchmark.",
+    body: "Rust, no garbage collector, no heap to size. 280 MB with 100k relationships in our v0.2 benchmark.",
     href: "#benchmarks",
   },
   {
