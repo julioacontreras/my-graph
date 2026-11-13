@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod error;
 pub mod graph;
 pub mod path_cache;
+pub mod props;
 pub mod transaction;
 pub mod value;
 
@@ -17,5 +18,6 @@ pub use graph::{
     Relationship, SchemaId,
 };
 pub use path_cache::{CachedPaths, PathCache, PathKey, DEFAULT_PATH_CACHE_ENTRIES};
+pub use props::{KeyInterner, Properties};
 pub use transaction::{now_millis, Journal, WriteContext};
 pub use value::{format_identifier, NodeValue, PathValue, PropertyMap, RelationshipValue, Value};

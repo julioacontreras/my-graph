@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use mygraph_core::{Adjacent, Graph, LabelId, NodeId, PathKey, PropertyMap, RelId, Result, Value};
+use mygraph_core::{Adjacent, Graph, LabelId, NodeId, PathKey, Properties, RelId, Result, Value};
 
 use crate::ast::*;
 use crate::executor::eval::{equals, type_err, Env, Row, Val};
@@ -1049,7 +1049,7 @@ fn eval_props(env: &Env<'_>, expr: &Option<Expr>, row: &Row) -> Result<Option<BT
 }
 
 /// Whether every expected entry equals the stored property (Cypher equality).
-fn props_equal(expected: &BTreeMap<String, Val>, props: &PropertyMap) -> bool {
+fn props_equal(expected: &BTreeMap<String, Val>, props: &Properties) -> bool {
     expected.iter().all(|(k, v)| {
         props.get(k).is_some_and(|actual| match (actual, v) {
             // fast paths that avoid converting the stored value

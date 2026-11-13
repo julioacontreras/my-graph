@@ -6,7 +6,7 @@
 //! files (no indexes) are still read.
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use mygraph_core::{Catalog, Change, Graph, GraphDatabase, MyGraphError, Result, Schema};
@@ -15,14 +15,53 @@ use crate::codec::{Decoder, Encoder};
 
 const MAGIC: &[u8; 8] = b"MYGRSNAP";
 pub const FORMAT_VERSION: u16 = 2;
+const HEADER_LEN: u64 = 8 + 2 + 8;
+/// The encoder hands its buffer to the writer once it holds this many bytes,
+/// so a checkpoint never holds more than this much of the snapshot in memory.
+const CHUNK: usize = 1 << 20;
 
-pub fn encode(catalog: &Catalog, lsn: u64) -> Result<Vec<u8>> {
-    let mut b = Encoder::default();
+/// Writes the body to `out` in chunks while hashing and counting it.
+struct BodySink<'w, W: Write> {
+    out: &'w mut W,
+    enc: Encoder,
+    crc: crc32fast::Hasher,
+    len: u64,
+}
+
+impl<W: Write> BodySink<'_, W> {
+    fn maybe_flush(&mut self) -> Result<()> {
+        if self.enc.buf.len() >= CHUNK {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.crc.update(&self.enc.buf);
+        self.len += self.enc.buf.len() as u64;
+        self.out.write_all(&self.enc.buf)?;
+        self.enc.buf.clear();
+        Ok(())
+    }
+}
+
+/// Streams the snapshot of `catalog` into `out`. The body length goes in the
+/// header, so it is written as a placeholder and filled in at the end.
+pub fn encode_to<W: Write + Seek>(catalog: &Catalog, lsn: u64, out: &mut W) -> Result<()> {
+    let base = out.stream_position()?;
+    out.write_all(MAGIC)?;
+    out.write_all(&FORMAT_VERSION.to_le_bytes())?;
+    out.write_all(&0u64.to_le_bytes())?;
+
+    let mut s = BodySink { out, enc: Encoder::default(), crc: crc32fast::Hasher::new(), len: 0 };
+    s.enc.buf.reserve(CHUNK + 4096);
+    let b = &mut s.enc;
     b.u64(lsn);
     b.u32(catalog.next_database_id());
     let dbs: Vec<&GraphDatabase> = catalog.databases().collect();
     b.u32(dbs.len() as u32);
     for db in dbs {
+        let b = &mut s.enc;
         b.u32(db.id);
         b.str(&db.name)?;
         b.u32(db.next_schema_id);
@@ -30,27 +69,33 @@ pub fn encode(catalog: &Catalog, lsn: u64) -> Result<Vec<u8>> {
         b.u64(db.ids.next_relationship_id);
         let schemas: Vec<&Schema> = db.schemas().collect();
         b.u32(schemas.len() as u32);
-        for s in schemas {
-            b.u32(s.id);
-            b.str(&s.name)?;
-            let g = &s.graph;
+        for sc in schemas {
+            let g = &sc.graph;
+            let b = &mut s.enc;
+            b.u32(sc.id);
+            b.str(&sc.name)?;
             b.u64(g.node_count() as u64);
             for n in g.nodes() {
+                let b = &mut s.enc;
                 b.u64(n.id);
                 b.strings(&g.node_label_names(n))?;
-                b.properties(&n.properties)?;
+                b.stored_properties(&n.properties)?;
                 b.u64(n.created_at);
                 b.u64(n.updated_at);
+                s.maybe_flush()?;
             }
-            b.u64(g.relationship_count() as u64);
+            s.enc.u64(g.relationship_count() as u64);
             for r in g.relationships() {
+                let b = &mut s.enc;
                 b.u64(r.id);
                 b.u64(r.start_node);
                 b.u64(r.end_node);
                 b.str(g.rel_type_name(r.rel_type))?;
-                b.properties(&r.properties)?;
+                b.stored_properties(&r.properties)?;
+                s.maybe_flush()?;
             }
             let indexes = g.indexes();
+            let b = &mut s.enc;
             b.u32(indexes.len() as u32);
             for i in indexes {
                 b.str(&i.name)?;
@@ -59,39 +104,73 @@ pub fn encode(catalog: &Catalog, lsn: u64) -> Result<Vec<u8>> {
             }
         }
     }
-
-    let mut out = Encoder::default();
-    out.buf.extend_from_slice(MAGIC);
-    out.u16(FORMAT_VERSION);
-    out.u64(b.buf.len() as u64);
-    out.buf.extend_from_slice(&b.buf);
-    out.u32(crc32fast::hash(&b.buf));
-    Ok(out.buf)
+    s.flush()?;
+    let (len, crc) = (s.len, s.crc.finalize());
+    out.write_all(&crc.to_le_bytes())?;
+    let end = out.stream_position()?;
+    out.seek(SeekFrom::Start(base + 10))?;
+    out.write_all(&len.to_le_bytes())?;
+    out.seek(SeekFrom::Start(end))?;
+    Ok(())
 }
 
-pub fn decode(bytes: &[u8]) -> Result<(Catalog, u64)> {
-    let corrupt = |m: &str| MyGraphError::Corruption(format!("snapshot: {m}"));
-    if bytes.len() < 8 + 2 + 8 + 4 || &bytes[..8] != MAGIC {
+pub fn encode(catalog: &Catalog, lsn: u64) -> Result<Vec<u8>> {
+    let mut out = Cursor::new(Vec::new());
+    encode_to(catalog, lsn, &mut out)?;
+    Ok(out.into_inner())
+}
+
+/// Hashes what passes through it, to check the body CRC while streaming.
+struct CrcReader<R> {
+    inner: R,
+    crc: crc32fast::Hasher,
+}
+
+impl<R: Read> Read for CrcReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.crc.update(&buf[..n]);
+        Ok(n)
+    }
+}
+
+fn corrupt(m: &str) -> MyGraphError {
+    MyGraphError::Corruption(format!("snapshot: {m}"))
+}
+
+/// Decodes a snapshot of `total` bytes from `src`.
+fn decode_from<R: Read>(mut src: R, total: u64) -> Result<(Catalog, u64)> {
+    let mut header = [0u8; HEADER_LEN as usize];
+    if total < HEADER_LEN + 4 || src.read_exact(&mut header).is_err() || &header[..8] != MAGIC {
         return Err(corrupt("bad header"));
     }
-    let mut h = Decoder::new(&bytes[8..18]);
-    let version = h.u16()?;
+    let version = u16::from_le_bytes([header[8], header[9]]);
     if version != FORMAT_VERSION && version != 1 {
         return Err(MyGraphError::Storage(format!(
             "snapshot format version {version} is not supported (expected {FORMAT_VERSION})"
         )));
     }
-    let len = h.u64()? as usize;
-    if bytes.len() != 18 + len + 4 {
+    let len = u64::from_le_bytes(header[10..18].try_into().unwrap());
+    if total.checked_sub(HEADER_LEN + 4) != Some(len) {
         return Err(corrupt("length mismatch"));
     }
-    let body = &bytes[18..18 + len];
-    let crc = u32::from_le_bytes(bytes[18 + len..].try_into().unwrap());
-    if crc32fast::hash(body) != crc {
+
+    let mut d = Decoder::from_reader(CrcReader { inner: src, crc: crc32fast::Hasher::new() }, len);
+    let body = decode_body(&mut d, version);
+    // Check the CRC over the whole body even when decoding stopped early, so
+    // a damaged file is reported as such and not as whatever error the
+    // damaged bytes happened to cause.
+    let drained = if body.is_err() { d.skip_rest().is_ok() } else { true };
+    let CrcReader { inner: mut src, crc } = d.into_inner();
+    let mut tail = [0u8; 4];
+    let crc_ok = drained && src.read_exact(&mut tail).is_ok() && crc.finalize() == u32::from_le_bytes(tail);
+    if !crc_ok {
         return Err(corrupt("checksum mismatch"));
     }
+    body
+}
 
-    let mut d = Decoder::new(body);
+fn decode_body<R: Read>(d: &mut Decoder<R>, version: u16) -> Result<(Catalog, u64)> {
     let lsn = d.u64()?;
     let mut catalog = Catalog::empty();
     let next_db_id = d.u32()?;
@@ -138,13 +217,17 @@ pub fn decode(bytes: &[u8]) -> Result<(Catalog, u64)> {
     Ok((catalog, lsn))
 }
 
+pub fn decode(bytes: &[u8]) -> Result<(Catalog, u64)> {
+    decode_from(bytes, bytes.len() as u64)
+}
+
 /// Atomically replaces the snapshot at `path` (write temp file, fsync, rename, fsync dir).
 pub fn write(path: &Path, catalog: &Catalog, lsn: u64) -> Result<()> {
-    let bytes = encode(catalog, lsn)?;
     let tmp = path.with_extension("tmp");
     {
-        let mut f = File::create(&tmp)?;
-        f.write_all(&bytes)?;
+        let mut f = BufWriter::with_capacity(CHUNK, File::create(&tmp)?);
+        encode_to(catalog, lsn, &mut f)?;
+        let f = f.into_inner().map_err(|e| MyGraphError::from(e.into_error()))?;
         f.sync_all()?;
     }
     fs::rename(&tmp, path)?;
@@ -155,8 +238,11 @@ pub fn write(path: &Path, catalog: &Catalog, lsn: u64) -> Result<()> {
 }
 
 pub fn read(path: &Path) -> Result<Option<(Catalog, u64)>> {
-    match fs::read(path) {
-        Ok(bytes) => decode(&bytes).map(Some),
+    match File::open(path) {
+        Ok(f) => {
+            let total = f.metadata()?.len();
+            decode_from(BufReader::with_capacity(CHUNK, f), total).map(Some)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
