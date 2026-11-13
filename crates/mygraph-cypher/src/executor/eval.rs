@@ -1,9 +1,11 @@
 //! Runtime values and expression evaluation.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 
 use mygraph_core::{Graph, MyGraphError, NodeId, RelId, Result, Value};
+use regex::Regex;
 
 use crate::ast::{is_aggregate_function, BinaryOp, Expr, UnaryOp};
 use crate::executor::functions;
@@ -343,6 +345,25 @@ pub(crate) fn arithmetic(op: BinaryOp, l: Val, r: Val) -> Result<Val> {
 pub(crate) struct Env<'a> {
     pub graph: &'a Graph,
     pub params: &'a BTreeMap<String, Val>,
+    /// Compiled `=~` patterns, shared by every row of one query.
+    pub regexes: &'a RegexCache,
+}
+
+/// Cache of compiled regular expressions, keyed by the source pattern.
+#[derive(Default)]
+pub(crate) struct RegexCache(RefCell<HashMap<String, Regex>>);
+
+impl RegexCache {
+    /// Whether `pattern` matches the whole of `text` (Cypher `=~` semantics).
+    fn is_full_match(&self, pattern: &str, text: &str) -> Result<bool> {
+        let mut cache = self.0.borrow_mut();
+        if !cache.contains_key(pattern) {
+            let re = Regex::new(&format!("^(?:{pattern})$"))
+                .map_err(|e| type_err(format!("invalid regular expression {pattern:?}: {e}")))?;
+            cache.insert(pattern.to_string(), re);
+        }
+        Ok(cache[pattern].is_match(text))
+    }
 }
 
 impl Env<'_> {
@@ -515,6 +536,10 @@ impl Env<'_> {
                     BinaryOp::EndsWith => s.ends_with(t.as_str()),
                     _ => s.contains(t.as_str()),
                 }),
+                _ => Val::Null,
+            },
+            BinaryOp::RegexMatch => match (&a, &b) {
+                (Val::Str(s), Val::Str(pattern)) => Val::Bool(self.regexes.is_full_match(pattern, s)?),
                 _ => Val::Null,
             },
             _ => arithmetic(op, a, b)?,

@@ -2,8 +2,8 @@
 //!
 //! Layout: `MAGIC (8) | format version u16 | body length u64 | body | crc32(body) u32`.
 //! The body starts with the WAL sequence number (LSN) the snapshot includes.
-//! Version 2 adds the property-index definitions of each schema; version 1
-//! files (no indexes) are still read.
+//! Version 2 adds the property-index definitions of each schema, version 3
+//! the constraint definitions; older versions are still read.
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
@@ -14,7 +14,7 @@ use mygraph_core::{Catalog, Change, Graph, GraphDatabase, MyGraphError, Result, 
 use crate::codec::{Decoder, Encoder};
 
 const MAGIC: &[u8; 8] = b"MYGRSNAP";
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: u64 = 8 + 2 + 8;
 /// The encoder hands its buffer to the writer once it holds this many bytes,
 /// so a checkpoint never holds more than this much of the snapshot in memory.
@@ -102,6 +102,11 @@ pub fn encode_to<W: Write + Seek>(catalog: &Catalog, lsn: u64, out: &mut W) -> R
                 b.str(&i.label)?;
                 b.str(&i.key)?;
             }
+            let constraints = g.constraints();
+            b.u32(constraints.len() as u32);
+            for c in constraints {
+                b.constraint(&c.name, &c.label, &c.key, c.kind, c.owns_index)?;
+            }
         }
     }
     s.flush()?;
@@ -145,7 +150,7 @@ fn decode_from<R: Read>(mut src: R, total: u64) -> Result<(Catalog, u64)> {
         return Err(corrupt("bad header"));
     }
     let version = u16::from_le_bytes([header[8], header[9]]);
-    if version != FORMAT_VERSION && version != 1 {
+    if !(1..=FORMAT_VERSION).contains(&version) {
         return Err(MyGraphError::Storage(format!(
             "snapshot format version {version} is not supported (expected {FORMAT_VERSION})"
         )));
@@ -204,6 +209,11 @@ fn decode_body<R: Read>(d: &mut Decoder<R>, version: u16) -> Result<(Catalog, u6
             if version >= 2 {
                 for _ in 0..d.u32()? {
                     graph.apply(&Change::CreateIndex { name: d.str()?, label: d.str()?, key: d.str()? })?;
+                }
+            }
+            if version >= 3 {
+                for _ in 0..d.u32()? {
+                    graph.apply(&d.constraint()?)?;
                 }
             }
             db.insert_schema(Schema { id, name, graph });

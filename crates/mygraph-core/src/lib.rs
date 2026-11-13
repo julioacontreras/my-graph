@@ -14,8 +14,8 @@ pub mod value;
 pub use catalog::{Catalog, GraphDatabase, IdAllocator, Op, Schema, DEFAULT_DATABASE, DEFAULT_SCHEMA};
 pub use error::{MyGraphError, Result};
 pub use graph::{
-    Adjacent, Change, Graph, IdHasher, IdMap, IdSet, IndexInfo, IndexKey, LabelId, Node, NodeId, RelId, RelTypeId,
-    Relationship, SchemaId,
+    Adjacent, Change, ConstraintInfo, ConstraintKind, Graph, IdHasher, IdMap, IdSet, IndexInfo, IndexKey, LabelId,
+    Node, NodeId, RelId, RelTypeId, Relationship, SchemaId,
 };
 pub use path_cache::{CachedPaths, PathCache, PathKey, DEFAULT_PATH_CACHE_ENTRIES};
 pub use props::{KeyInterner, Properties};

@@ -5,8 +5,8 @@ const ROWS: [string, string][] = [
   ["Graphs that fit in RAM", "Graphs larger than memory (no page-based storage)"],
   ["Many concurrent readers, one writer at a time", "Many concurrent writers (no MVCC)"],
   ["Trusted networks, local or embedded use", "Authentication or TLS (AUTH is accepted but not checked)"],
-  ["Cypher reads, writes and paths", "MERGE, UNION, constraints, procedures, regex"],
-  ["Equality lookups by property", "Range or composite indexes"],
+  ["Cypher reads, writes, MERGE, UNION and paths", "CALL subqueries or user-defined procedures"],
+  ["Equality lookups, unique and not-null constraints", "Range or composite indexes and constraints"],
 ];
 
 export function Limitations() {

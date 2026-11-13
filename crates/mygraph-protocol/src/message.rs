@@ -88,6 +88,7 @@ pub fn error_code(e: &MyGraphError) -> &'static str {
         MyGraphError::AlreadyExists(_) => "AlreadyExists",
         MyGraphError::InvalidName(_) => "InvalidName",
         MyGraphError::Unsupported(_) => "Unsupported",
+        MyGraphError::ConstraintViolation(_) => "ConstraintViolation",
         MyGraphError::Transaction(_) => "Transaction",
         MyGraphError::Storage(_) => "Storage",
         MyGraphError::Corruption(_) => "Corruption",

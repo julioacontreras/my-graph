@@ -22,7 +22,7 @@ export function AnnouncementBar() {
     <div className="relative bg-gradient-to-r from-primary/25 via-violet/20 to-primary/25 text-sm">
       <div className="mx-auto flex min-h-10 max-w-6xl items-center justify-center px-12 py-2 text-center">
         <a href={links.changelog} className="text-fg hover:underline underline-offset-4">
-          <span className="font-semibold">v{VERSION} is out:</span> about half the memory for large graphs{" "}
+          <span className="font-semibold">v{VERSION} is out:</span> MERGE, UNION, constraints, CALL and regex{" "}
           <span aria-hidden="true">→</span>
         </a>
       </div>

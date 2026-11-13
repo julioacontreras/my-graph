@@ -2,7 +2,9 @@
 
 > MyGraph is an open-source (MIT) property-graph database written in Rust and queried with Cypher. It runs embedded in a Rust program or as a TCP server (port 6660), with a Python client and a CLI. The graph lives in memory and is persisted with a write-ahead log and snapshots.
 
-Not supported yet: MERGE, UNION, range or composite indexes, MVCC/concurrent writers, page-based storage, authentication (AUTH is accepted but not checked), TLS. Property indexes are not created automatically.
+Cypher support includes MERGE (ON CREATE / ON MATCH), UNION / UNION ALL, =~ regular expressions, unique and not-null constraints (CREATE CONSTRAINT ... REQUIRE n.p IS UNIQUE | IS NOT NULL) and built-in procedures (CALL db.labels(), db.relationshipTypes(), db.propertyKeys(), db.indexes(), db.constraints(), dbms.procedures()).
+
+Not supported yet: range or composite indexes, composite constraints, CALL subqueries, user-defined procedures, MVCC/concurrent writers, page-based storage, authentication (AUTH is accepted but not checked), TLS. Property indexes are not created automatically.
 
 ## Docs
 

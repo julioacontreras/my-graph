@@ -9,6 +9,7 @@ mod eval;
 mod functions;
 mod matcher;
 mod paths;
+mod procedures;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::AddAssign;
@@ -16,7 +17,7 @@ use std::ops::AddAssign;
 use mygraph_core::{Graph, MyGraphError, NodeId, PropertyMap, Result, Value, WriteContext};
 
 use crate::ast::*;
-use eval::{arithmetic, group_key, order_cmp, type_err, Env, Row, Val};
+use eval::{arithmetic, group_key, order_cmp, type_err, Env, RegexCache, Row, Val};
 
 /// Counters describing what a query changed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -55,6 +56,11 @@ pub struct ExecResult {
     pub stats: QueryStats,
 }
 
+/// The built-in procedure called `name`, for the semantic checks.
+pub(crate) fn procedure(name: &str) -> Option<&'static procedures::Procedure> {
+    procedures::lookup(name)
+}
+
 /// Runs a query against one schema graph. All changes go through `ctx`, so the
 /// caller can commit or roll them back.
 pub fn execute(query: &Query, ctx: &mut WriteContext<'_>, params: &BTreeMap<String, Value>) -> Result<ExecResult> {
@@ -70,7 +76,8 @@ pub fn execute_read(query: &Query, graph: &Graph, params: &BTreeMap<String, Valu
 fn run(query: &Query, target: &mut Target<'_, '_>, params: &BTreeMap<String, Value>) -> Result<ExecResult> {
     crate::semantic::check_query(query)?;
     let params: BTreeMap<String, Val> = params.iter().map(|(k, v)| (k.clone(), Val::from_value(v))).collect();
-    let mut exec = Executor { params: &params, stats: QueryStats::default() };
+    let regexes = RegexCache::default();
+    let mut exec = Executor { params: &params, stats: QueryStats::default(), regexes: &regexes };
     exec.run(query, target)
 }
 
@@ -100,6 +107,7 @@ impl<'w> Target<'_, 'w> {
 struct Executor<'p> {
     params: &'p BTreeMap<String, Val>,
     stats: QueryStats,
+    regexes: &'p RegexCache,
 }
 
 fn bind(row: &mut Row, var: &Option<String>, val: Val) {
@@ -125,10 +133,32 @@ impl Executor<'_> {
     where
         Self: 'g,
     {
-        Env { graph, params: self.params }
+        Env { graph, params: self.params, regexes: self.regexes }
     }
 
     fn run(&mut self, q: &Query, target: &mut Target<'_, '_>) -> Result<ExecResult> {
+        let mut out = self.run_single(&q.parts[0], target)?;
+        if q.parts.len() > 1 {
+            for part in &q.parts[1..] {
+                let next = self.run_single(part, target)?;
+                if next.columns != out.columns {
+                    return Err(crate::semantic::union_columns_error(&out.columns, &next.columns));
+                }
+                out.rows.extend(next.rows);
+            }
+            if !q.union_all {
+                let mut seen = HashSet::new();
+                out.rows.retain(|row| {
+                    let vals: Vec<Val> = row.iter().map(Val::from_value).collect();
+                    seen.insert(group_key(&vals.iter().collect::<Vec<_>>()))
+                });
+            }
+        }
+        out.stats = self.stats.clone();
+        Ok(out)
+    }
+
+    fn run_single(&mut self, q: &SingleQuery, target: &mut Target<'_, '_>) -> Result<ExecResult> {
         let mut rows: Vec<Row> = vec![Row::new()];
         let mut out = ExecResult::default();
         for clause in &q.clauses {
@@ -144,6 +174,29 @@ impl Executor<'_> {
                         }
                     }
                     rows
+                }
+                Clause::Call { procedure, args, yields, filter } => {
+                    let columns = crate::semantic::call_columns(procedure, args.len(), yields.as_deref())?;
+                    let produced = self.do_call(target.graph(), rows, procedure, args, yields.as_deref(), &columns)?;
+                    let produced = match filter {
+                        Some(f) => filter_rows(&self.env(target.graph()), produced, f)?,
+                        None => produced,
+                    };
+                    if q.clauses.len() == 1 {
+                        // A standalone CALL returns what it yields.
+                        let g = target.graph();
+                        out.rows = produced
+                            .iter()
+                            .map(|row| columns.iter().map(|c| row[c].materialize(g)).collect::<Result<Vec<_>>>())
+                            .collect::<Result<_>>()?;
+                        out.columns = columns;
+                        Vec::new()
+                    } else {
+                        produced
+                    }
+                }
+                Clause::Merge { pattern, on_create, on_match } => {
+                    self.do_merge(target.writer()?, rows, pattern, on_create, on_match)?
                 }
                 Clause::Set { items } => {
                     let ctx = target.writer()?;
@@ -204,7 +257,6 @@ impl Executor<'_> {
                 }
             };
         }
-        out.stats = self.stats.clone();
         Ok(out)
     }
 
@@ -296,6 +348,103 @@ impl Executor<'_> {
             self.stats.relationships_created += 1;
             bind(row, &rp.variable, Val::Rel(id));
             prev = next;
+        }
+        Ok(())
+    }
+
+    // ---- CALL ----
+
+    /// Runs the procedure once per input row and binds the yielded columns
+    /// under `columns` (the yielded names, aliases applied).
+    fn do_call(
+        &self,
+        graph: &Graph,
+        rows: Vec<Row>,
+        procedure: &str,
+        args: &[Expr],
+        yields: Option<&[(String, Option<String>)]>,
+        columns: &[String],
+    ) -> Result<Vec<Row>> {
+        let p = procedures::lookup(procedure).expect("checked by call_columns");
+        let picks: Vec<usize> = match yields {
+            None => (0..p.outputs.len()).collect(),
+            Some(items) => items
+                .iter()
+                .map(|(name, _)| p.outputs.iter().position(|o| o == name).expect("checked by call_columns"))
+                .collect(),
+        };
+        let env = self.env(graph);
+        let mut out = Vec::new();
+        for row in rows {
+            let vals = args.iter().map(|a| env.eval(a, &row)).collect::<Result<Vec<_>>>()?;
+            for record in p.run(&env, &vals)? {
+                let mut r = row.clone();
+                for (col, &i) in columns.iter().zip(&picks) {
+                    r.insert(col.clone(), record[i].clone());
+                }
+                out.push(r);
+            }
+        }
+        Ok(out)
+    }
+
+    // ---- MERGE ----
+
+    fn do_merge(
+        &mut self,
+        ctx: &mut WriteContext<'_>,
+        rows: Vec<Row>,
+        pattern: &PathPattern,
+        on_create: &[SetItem],
+        on_match: &[SetItem],
+    ) -> Result<Vec<Row>> {
+        // An undirected relationship is matched both ways and created left to right.
+        let mut to_create = pattern.clone();
+        for (r, _) in &mut to_create.steps {
+            if r.direction == Direction::Both {
+                r.direction = Direction::Outgoing;
+            }
+        }
+        let mut out = Vec::new();
+        for row in rows {
+            self.check_merge_properties(ctx.graph(), pattern, &row)?;
+            // Planned on every row: rows merged earlier in this clause are
+            // already in the graph, so equal rows find them instead of
+            // creating duplicates.
+            let matches = {
+                let env = self.env(ctx.graph());
+                matcher::Matcher::new(&env, std::slice::from_ref(pattern), None, &row).run(row.clone())?
+            };
+            if matches.is_empty() {
+                let mut r = row;
+                self.create_path(ctx, &mut r, &to_create)?;
+                self.do_set(ctx, &r, on_create)?;
+                out.push(r);
+            } else {
+                for r in matches {
+                    self.do_set(ctx, &r, on_match)?;
+                    out.push(r);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// MERGE cannot match or create a pattern with a null property value.
+    fn check_merge_properties(&self, graph: &Graph, p: &PathPattern, row: &Row) -> Result<()> {
+        let props = std::iter::once(&p.start.properties)
+            .chain(p.steps.iter().flat_map(|(r, n)| [&r.properties, &n.properties]));
+        for e in props.flatten() {
+            match self.env(graph).eval(e, row)? {
+                Val::Map(m) => {
+                    if let Some((k, _)) = m.iter().find(|(_, v)| **v == Val::Null) {
+                        return Err(MyGraphError::Semantic(format!(
+                            "cannot merge using a null property value (`{k}` is null)"
+                        )));
+                    }
+                }
+                other => return Err(type_err(format!("properties must be a MAP, got {}", other.type_name()))),
+            }
         }
         Ok(())
     }

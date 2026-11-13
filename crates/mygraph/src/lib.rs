@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Concurrency: a [`Database`] is `Send + Sync`. Scripts made only of
-//! read-only queries (no CREATE, SET, REMOVE or DELETE) run concurrently, each
+//! read-only queries (no CREATE, MERGE, SET, REMOVE or DELETE) run concurrently, each
 //! seeing a consistent graph; anything else runs alone. An explicit
 //! [`Transaction`] holds exclusive access until it is committed or rolled
 //! back. MVCC is planned for a later phase.
@@ -21,7 +21,7 @@ mod result;
 
 use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use mygraph_core::{Catalog, Change, Journal, Op, WriteContext, DEFAULT_DATABASE, DEFAULT_SCHEMA};
+use mygraph_core::{Catalog, Change, ConstraintKind, Journal, Op, WriteContext, DEFAULT_DATABASE, DEFAULT_SCHEMA};
 use mygraph_cypher::{AdminCommand, ExecResult, IndexTarget, Query, Statement};
 
 /// Whether a parsed script only reads, so it can share the database.
@@ -259,10 +259,14 @@ impl Inner {
         params: &Params,
         journal: &mut Journal,
     ) -> Result<ExecResult> {
+        let mark = journal.mark();
         let (graph, ids) = self.catalog.database_mut(db)?.write_parts(schema)?;
         graph.set_path_cache_capacity(self.config.path_cache_entries);
-        let mut ctx = WriteContext::new(graph, ids, journal);
-        mygraph_cypher::execute(q, &mut ctx, params)
+        let result = mygraph_cypher::execute(q, &mut WriteContext::new(graph, ids, journal), params)?;
+        // Constraints are checked once the whole statement has run; the caller
+        // rolls the statement back if this fails.
+        graph.check_constraints(&journal.changes()[mark..])?;
+        Ok(result)
     }
 
     fn rollback_to(&mut self, db: &str, schema: &str, journal: &mut Journal, mark: usize) -> Result<()> {
@@ -319,9 +323,18 @@ impl Inner {
 
     /// Applies one schema-level change (index DDL) in its own transaction.
     fn apply_schema_change(&mut self, db: &str, schema: &str, change: Change) -> Result<()> {
+        self.apply_schema_changes(db, schema, vec![change])
+    }
+
+    /// Applies schema-level changes as one transaction: all of them or none.
+    fn apply_schema_changes(&mut self, db: &str, schema: &str, changes: Vec<Change>) -> Result<()> {
         let mut journal = Journal::default();
         let (graph, ids) = self.catalog.database_mut(db)?.write_parts(schema)?;
-        WriteContext::new(graph, ids, &mut journal).apply(change)?;
+        let mut ctx = WriteContext::new(graph, ids, &mut journal);
+        if let Err(e) = changes.into_iter().try_for_each(|c| ctx.apply(c).map(drop)) {
+            self.rollback_to(db, schema, &mut journal, 0)?;
+            return Err(e);
+        }
         self.persist(db, schema, journal)
     }
 
@@ -371,6 +384,69 @@ impl Inner {
                                 Value::from(i.label),
                                 Value::from(i.key),
                                 Value::Integer(i.entries as i64),
+                            ]
+                        })
+                        .collect(),
+                    stats: QueryStats::default(),
+                });
+            }
+            AdminCommand::CreateConstraint { name, label, key, kind, if_not_exists } => {
+                let suffix = match kind {
+                    ConstraintKind::Unique => "unique",
+                    ConstraintKind::NotNull => "not_null",
+                };
+                let name = name.clone().unwrap_or_else(|| format!("constraint_{label}_{key}_{suffix}"));
+                let graph = &self.catalog.database(&current_db)?.schema(&session.schema)?.graph;
+                let exists = graph.constraint(&name).is_some() || graph.constraint_on(label, key, *kind).is_some();
+                if !(*if_not_exists && exists) {
+                    // A unique constraint is checked through an index; create
+                    // one with the constraint's name when there is none.
+                    let owns_index = *kind == ConstraintKind::Unique && !graph.has_index(label, key);
+                    let mut changes = Vec::new();
+                    if owns_index {
+                        changes.push(Change::CreateIndex {
+                            name: name.clone(),
+                            label: label.clone(),
+                            key: key.clone(),
+                        });
+                    }
+                    changes.push(Change::CreateConstraint {
+                        name,
+                        label: label.clone(),
+                        key: key.clone(),
+                        kind: *kind,
+                        owns_index,
+                    });
+                    self.apply_schema_changes(&current_db, &session.schema.clone(), changes)?;
+                }
+            }
+            AdminCommand::DropConstraint { name, if_exists } => {
+                let graph = &self.catalog.database(&current_db)?.schema(&session.schema)?.graph;
+                match graph.constraint(name) {
+                    Some(c) => {
+                        let mut changes = vec![Change::DropConstraint { name: name.clone() }];
+                        if c.owns_index {
+                            changes.push(Change::DropIndex { label: c.label.clone(), key: c.key.clone() });
+                        }
+                        self.apply_schema_changes(&current_db, &session.schema.clone(), changes)?;
+                    }
+                    None if *if_exists => {}
+                    None => return Err(MyGraphError::NotFound(format!("constraint `{name}`"))),
+                }
+            }
+            AdminCommand::ShowConstraints => {
+                let graph = &self.catalog.database(&current_db)?.schema(&session.schema)?.graph;
+                return Ok(QueryResult {
+                    columns: vec!["name".into(), "type".into(), "label".into(), "property".into()],
+                    rows: graph
+                        .constraints()
+                        .into_iter()
+                        .map(|c| {
+                            vec![
+                                Value::from(c.name),
+                                Value::from(c.kind.as_str()),
+                                Value::from(c.label),
+                                Value::from(c.key),
                             ]
                         })
                         .collect(),

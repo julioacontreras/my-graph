@@ -8,9 +8,10 @@ const PROPS = [
     body: (
       <>
         <code className="inline-code">MATCH</code>, <code className="inline-code">OPTIONAL MATCH</code>,{" "}
+        <code className="inline-code">MERGE</code>, <code className="inline-code">UNION</code>,{" "}
         <code className="inline-code">WITH</code>, <code className="inline-code">UNWIND</code>, aggregations,
-        variable-length paths and <code className="inline-code">shortestPath</code>, by hops or by a weight
-        property. Index syntax from both Neo4j and Memgraph.
+        regular expressions, variable-length paths and <code className="inline-code">shortestPath</code>, by hops
+        or by a weight property. Index and constraint syntax from both Neo4j and Memgraph.
       </>
     ),
     href: links.cypher,
@@ -45,6 +46,8 @@ const PROPS = [
 const SECONDARY = [
   "Multiple databases and schemas",
   "Property indexes and a rule-based planner",
+  "Unique and not-null constraints",
+  "Built-in procedures: CALL db.labels()",
   "--json output for scripts and agents",
   "Docker image for amd64 and arm64",
   "Errors with line and column",

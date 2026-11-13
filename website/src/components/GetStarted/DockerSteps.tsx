@@ -110,8 +110,9 @@ export function DockerSteps() {
             or keep it on a private network.
           </Callout>
           <Callout title="Upgrading.">
-            0.3 reads 0.2 and 0.1 data, and 0.2 reads 0.3 data (0.3.1 included). 0.1 cannot read data written by 0.2 or later. Back
-            up the volume before upgrading.{" "}
+            0.4 reads data from every earlier version. Data written by 0.4 cannot be read by 0.3 or earlier, so a
+            downgrade needs the backup. 0.1 cannot read data written by 0.2 or later. Back up the volume before
+            upgrading.{" "}
             <a className="link" href={links.changelog}>Changelog</a>
           </Callout>
         </div>

@@ -15,6 +15,7 @@ from .client import Client, connect
 from .errors import (
     AlreadyExistsError,
     ConnectionClosedError,
+    ConstraintError,
     CypherSyntaxError,
     MyGraphError,
     NotFoundError,
@@ -31,6 +32,7 @@ __all__ = [
     "AlreadyExistsError",
     "Client",
     "ConnectionClosedError",
+    "ConstraintError",
     "CypherSyntaxError",
     "MyGraphError",
     "Node",
