@@ -5,7 +5,7 @@
 
 use std::io::Read;
 
-use mygraph_core::{Change, MyGraphError, Op, PropertyMap, Result, Value};
+use mygraph_core::{Change, ConstraintKind, MyGraphError, Op, PropertyMap, Result, Value};
 
 const MAX_DEPTH: usize = 64;
 
@@ -192,7 +192,35 @@ impl Encoder {
                 self.str(label)?;
                 self.str(key)?;
             }
+            Change::CreateConstraint { name, label, key, kind, owns_index } => {
+                self.u8(11);
+                self.constraint(name, label, key, *kind, *owns_index)?;
+            }
+            Change::DropConstraint { name } => {
+                self.u8(12);
+                self.str(name)?;
+            }
         }
+        Ok(())
+    }
+
+    /// A constraint definition, as written in WAL records and snapshots.
+    pub fn constraint(
+        &mut self,
+        name: &str,
+        label: &str,
+        key: &str,
+        kind: ConstraintKind,
+        owns_index: bool,
+    ) -> Result<()> {
+        self.str(name)?;
+        self.str(label)?;
+        self.str(key)?;
+        self.u8(match kind {
+            ConstraintKind::Unique => 1,
+            ConstraintKind::NotNull => 2,
+        });
+        self.u8(u8::from(owns_index));
         Ok(())
     }
 
@@ -388,8 +416,26 @@ impl<R: Read> Decoder<R> {
             8 => Change::RemoveLabel { id: self.u64()?, label: self.str()?, ts: self.u64()? },
             9 => Change::CreateIndex { name: self.str()?, label: self.str()?, key: self.str()? },
             10 => Change::DropIndex { label: self.str()?, key: self.str()? },
+            11 => self.constraint()?,
+            12 => Change::DropConstraint { name: self.str()? },
             t => return Err(corrupt(format!("unknown change tag {t}"))),
         })
+    }
+
+    /// Reads what [`Encoder::constraint`] wrote, as a `CreateConstraint` change.
+    pub fn constraint(&mut self) -> Result<Change> {
+        let (name, label, key) = (self.str()?, self.str()?, self.str()?);
+        let kind = match self.u8()? {
+            1 => ConstraintKind::Unique,
+            2 => ConstraintKind::NotNull,
+            t => return Err(corrupt(format!("unknown constraint kind {t}"))),
+        };
+        let owns_index = match self.u8()? {
+            0 => false,
+            1 => true,
+            t => return Err(corrupt(format!("invalid flag {t}"))),
+        };
+        Ok(Change::CreateConstraint { name, label, key, kind, owns_index })
     }
 
     pub fn op(&mut self) -> Result<Op> {
@@ -437,5 +483,32 @@ mod tests {
         e.op(&op).unwrap();
         assert_eq!(Decoder::new(&e.buf).op().unwrap(), op);
         assert!(Decoder::new(&e.buf[..e.buf.len() - 1]).op().is_err());
+    }
+
+    #[test]
+    fn constraint_changes_roundtrip() {
+        for change in [
+            Change::CreateConstraint {
+                name: "c".into(),
+                label: "User".into(),
+                key: "email".into(),
+                kind: ConstraintKind::Unique,
+                owns_index: true,
+            },
+            Change::CreateConstraint {
+                name: "n".into(),
+                label: "User".into(),
+                key: "name".into(),
+                kind: ConstraintKind::NotNull,
+                owns_index: false,
+            },
+            Change::DropConstraint { name: "c".into() },
+        ] {
+            let mut e = Encoder::default();
+            e.change(&change).unwrap();
+            let mut d = Decoder::new(&e.buf);
+            assert_eq!(d.change().unwrap(), change);
+            assert!(d.is_empty());
+        }
     }
 }

@@ -136,6 +136,21 @@ impl Parser<'_> {
         {
             return self.create_index();
         }
+        if self.is_kw("CREATE") && self.is_kw_at(1, "CONSTRAINT") {
+            return self.create_constraint();
+        }
+        if self.is_kw("DROP") && self.is_kw_at(1, "CONSTRAINT") {
+            self.advance();
+            self.advance();
+            let name = self.ident("a constraint name")?;
+            let if_exists = if self.eat_kw("IF") {
+                self.expect_kw("EXISTS")?;
+                true
+            } else {
+                false
+            };
+            return Ok(Statement::Admin(AdminCommand::DropConstraint { name, if_exists }));
+        }
         if self.is_kw("DROP") && self.is_kw_at(1, "INDEX") {
             self.advance();
             self.advance();
@@ -208,7 +223,10 @@ impl Parser<'_> {
             if self.eat_kw("INDEXES") || self.eat_kw("INDEX") {
                 return Ok(Statement::Admin(AdminCommand::ShowIndexes));
             }
-            return Err(self.error("expected `DATABASES`, `SCHEMAS` or `INDEXES`"));
+            if self.eat_kw("CONSTRAINTS") || self.eat_kw("CONSTRAINT") {
+                return Ok(Statement::Admin(AdminCommand::ShowConstraints));
+            }
+            return Err(self.error("expected `DATABASES`, `SCHEMAS`, `INDEXES` or `CONSTRAINTS`"));
         }
         if self.eat_kw("BEGIN") {
             return Ok(Statement::Begin);
@@ -262,6 +280,76 @@ impl Parser<'_> {
         Ok(Statement::Admin(AdminCommand::CreateIndex { name, label, key, if_not_exists }))
     }
 
+    /// `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:L) REQUIRE n.k IS UNIQUE | IS NOT NULL` (Neo4j)
+    /// or `CREATE CONSTRAINT ON (n:L) ASSERT n.k IS UNIQUE | ASSERT EXISTS (n.k)` (Memgraph).
+    fn create_constraint(&mut self) -> Result<Statement> {
+        self.expect_kw("CREATE")?;
+        self.expect_kw("CONSTRAINT")?;
+        let memgraph = self.is_kw("ON") && self.peek_at(1) == &Tok::LParen;
+        let (name, if_not_exists) = if memgraph {
+            // Memgraph treats an existing constraint as success
+            (None, true)
+        } else {
+            let name =
+                if self.is_kw("IF") || self.is_kw("FOR") { None } else { Some(self.ident("a constraint name")?) };
+            let if_not_exists = if self.eat_kw("IF") {
+                self.expect_kw("NOT")?;
+                self.expect_kw("EXISTS")?;
+                true
+            } else {
+                false
+            };
+            (name, if_not_exists)
+        };
+        self.expect_kw(if memgraph { "ON" } else { "FOR" })?;
+        self.expect(&Tok::LParen, "`(`")?;
+        let var = self.ident("a variable")?;
+        self.expect(&Tok::Colon, "`:`")?;
+        let label = self.ident("a label")?;
+        self.expect(&Tok::RParen, "`)`")?;
+        self.expect_kw(if memgraph { "ASSERT" } else { "REQUIRE" })?;
+        if memgraph && self.eat_kw("EXISTS") {
+            self.expect(&Tok::LParen, "`(`")?;
+            let key = self.constraint_property(&var)?;
+            self.expect(&Tok::RParen, "`)`")?;
+            return Ok(Statement::Admin(AdminCommand::CreateConstraint {
+                name,
+                label,
+                key,
+                kind: ConstraintKind::NotNull,
+                if_not_exists,
+            }));
+        }
+        let parens = self.eat(&Tok::LParen);
+        let key = self.constraint_property(&var)?;
+        if self.peek() == &Tok::Comma {
+            return Err(self.error("composite constraints are not supported yet"));
+        }
+        if parens {
+            self.expect(&Tok::RParen, "`)`")?;
+        }
+        self.expect_kw("IS")?;
+        let kind = if self.eat_kw("UNIQUE") {
+            ConstraintKind::Unique
+        } else if self.eat_kw("NOT") {
+            self.expect_kw("NULL")?;
+            ConstraintKind::NotNull
+        } else {
+            return Err(self.error("expected `UNIQUE` or `NOT NULL`"));
+        };
+        Ok(Statement::Admin(AdminCommand::CreateConstraint { name, label, key, kind, if_not_exists }))
+    }
+
+    /// `var.key`, where `var` must be the constraint's variable.
+    fn constraint_property(&mut self, var: &str) -> Result<String> {
+        let v = self.ident("a variable")?;
+        if v != var {
+            return Err(self.error(format!("expected variable `{var}`")));
+        }
+        self.expect(&Tok::Dot, "`.`")?;
+        self.ident("a property name")
+    }
+
     /// `:Label(key)`
     fn memgraph_index_target(&mut self) -> Result<(String, String)> {
         self.expect(&Tok::Colon, "`:`")?;
@@ -273,8 +361,30 @@ impl Parser<'_> {
     }
 
     fn query(&mut self) -> Result<Query> {
+        let mut parts = vec![self.single_query()?];
+        let mut union_all: Option<bool> = None;
+        while self.is_kw("UNION") {
+            if !matches!(parts.last().and_then(|p| p.clauses.last()), Some(Clause::Return(_))) {
+                return Err(self.error("each part of a UNION must end with RETURN"));
+            }
+            self.advance();
+            let all = self.eat_kw("ALL");
+            if union_all.is_some_and(|a| a != all) {
+                return Err(self.error("UNION and UNION ALL cannot be mixed in one query"));
+            }
+            union_all = Some(all);
+            let part = self.single_query()?;
+            if !matches!(part.clauses.last(), Some(Clause::Return(_))) {
+                return Err(self.error("each part of a UNION must end with RETURN"));
+            }
+            parts.push(part);
+        }
+        Ok(Query { parts, union_all: union_all.unwrap_or(false) })
+    }
+
+    fn single_query(&mut self) -> Result<SingleQuery> {
         let mut clauses = Vec::new();
-        while !matches!(self.peek(), Tok::Semi | Tok::Eof) {
+        while !matches!(self.peek(), Tok::Semi | Tok::Eof) && !self.is_kw("UNION") {
             if matches!(clauses.last(), Some(Clause::Return(_))) {
                 return Err(self.error("RETURN must be the last clause of a query"));
             }
@@ -285,7 +395,10 @@ impl Parser<'_> {
             Some(Clause::Match { .. } | Clause::With { .. } | Clause::Unwind { .. }) => {
                 Err(self.error("a query cannot end with MATCH, WITH or UNWIND; add a RETURN or an updating clause"))
             }
-            _ => Ok(Query { clauses }),
+            Some(Clause::Call { .. }) if clauses.len() > 1 => {
+                Err(self.error("a CALL inside a query must be followed by RETURN or an updating clause"))
+            }
+            _ => Ok(SingleQuery { clauses }),
         }
     }
 
@@ -301,14 +414,27 @@ impl Parser<'_> {
             return Ok(Clause::Create { patterns: self.patterns()? });
         }
         if self.eat_kw("MERGE") {
-            return Err(self.error("MERGE is not supported yet"));
+            let pattern = self.path()?;
+            if self.peek() == &Tok::Comma {
+                return Err(self.error("MERGE takes a single pattern; use one MERGE per pattern"));
+            }
+            let (mut on_create, mut on_match) = (Vec::new(), Vec::new());
+            while self.eat_kw("ON") {
+                let target = if self.eat_kw("CREATE") {
+                    &mut on_create
+                } else if self.eat_kw("MATCH") {
+                    &mut on_match
+                } else {
+                    return Err(self.error("expected `CREATE` or `MATCH` after `ON`"));
+                };
+                self.expect_kw("SET")?;
+                let items = self.set_items()?;
+                target.extend(items);
+            }
+            return Ok(Clause::Merge { pattern, on_create, on_match });
         }
         if self.eat_kw("SET") {
-            let mut items = vec![self.set_item()?];
-            while self.eat(&Tok::Comma) {
-                items.push(self.set_item()?);
-            }
-            return Ok(Clause::Set { items });
+            return Ok(Clause::Set { items: self.set_items()? });
         }
         if self.eat_kw("REMOVE") {
             let mut items = vec![self.remove_item()?];
@@ -340,7 +466,59 @@ impl Parser<'_> {
         if self.eat_kw("RETURN") {
             return Ok(Clause::Return(self.projection(false)?));
         }
-        Err(self.error("expected a clause (MATCH, CREATE, SET, REMOVE, DELETE, UNWIND, WITH or RETURN)"))
+        if self.eat_kw("CALL") {
+            return self.call();
+        }
+        Err(self.error("expected a clause (MATCH, CREATE, MERGE, SET, REMOVE, DELETE, UNWIND, WITH, CALL or RETURN)"))
+    }
+
+    /// After `CALL`: `ns.name(args) [YIELD a [AS b], … | YIELD *] [WHERE expr]`.
+    fn call(&mut self) -> Result<Clause> {
+        if self.peek() == &Tok::LBrace {
+            return Err(self.error("CALL subqueries are not supported yet"));
+        }
+        let mut procedure = self.ident("a procedure name")?;
+        while self.eat(&Tok::Dot) {
+            procedure.push('.');
+            procedure.push_str(&self.ident("a procedure name")?);
+        }
+        self.expect(&Tok::LParen, "`(`")?;
+        let mut args = Vec::new();
+        if !self.eat(&Tok::RParen) {
+            args.push(self.expr()?);
+            while self.eat(&Tok::Comma) {
+                args.push(self.expr()?);
+            }
+            self.expect(&Tok::RParen, "`)`")?;
+        }
+        let mut yields = None;
+        let mut filter = None;
+        if self.eat_kw("YIELD") {
+            if !self.eat(&Tok::Star) {
+                let mut items = Vec::new();
+                loop {
+                    let name = self.ident("an output column")?;
+                    let alias = if self.eat_kw("AS") { Some(self.ident("a variable")?) } else { None };
+                    items.push((name, alias));
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                yields = Some(items);
+            }
+            if self.eat_kw("WHERE") {
+                filter = Some(self.expr()?);
+            }
+        }
+        Ok(Clause::Call { procedure, args, yields, filter })
+    }
+
+    fn set_items(&mut self) -> Result<Vec<SetItem>> {
+        let mut items = vec![self.set_item()?];
+        while self.eat(&Tok::Comma) {
+            items.push(self.set_item()?);
+        }
+        Ok(items)
     }
 
     fn set_item(&mut self) -> Result<SetItem> {
@@ -671,6 +849,8 @@ impl Parser<'_> {
                 BinaryOp::EndsWith
             } else if self.eat_kw("CONTAINS") {
                 BinaryOp::Contains
+            } else if self.eat(&Tok::RegexMatch) {
+                BinaryOp::RegexMatch
             } else if self.eat_kw("IN") {
                 BinaryOp::In
             } else if self.eat_kw("IS") {
@@ -912,18 +1092,26 @@ mod tests {
         .unwrap();
         assert_eq!(stmts.len(), 2);
         let Statement::Query(q) = &stmts[1] else { panic!() };
-        let Clause::Return(p) = &q.clauses[1] else { panic!() };
+        let Clause::Return(p) = &q.parts[0].clauses[1] else { panic!() };
         assert_eq!(p.items[0].name, "u.name");
-        let Clause::Match { patterns, .. } = &q.clauses[0] else { panic!() };
+        let Clause::Match { patterns, .. } = &q.parts[0].clauses[0] else { panic!() };
         assert_eq!(patterns[0].steps[0].0.direction, Direction::Outgoing);
     }
 
     #[test]
     fn precedence() {
         let Statement::Query(q) = one("RETURN 1 + 2 * 3 = 7 AND NOT false AS x") else { panic!() };
-        let Clause::Return(p) = &q.clauses[0] else { panic!() };
+        let Clause::Return(p) = &q.parts[0].clauses[0] else { panic!() };
         assert!(matches!(&p.items[0].expr, Expr::Binary(BinaryOp::And, _, _)));
         assert_eq!(p.items[0].name, "x");
+    }
+
+    #[test]
+    fn regex_binds_tighter_than_and() {
+        let Statement::Query(q) = one("RETURN 'ab' =~ 'a.' AND true AS x") else { panic!() };
+        let Clause::Return(p) = &q.parts[0].clauses[0] else { panic!() };
+        let Expr::Binary(BinaryOp::And, l, _) = &p.items[0].expr else { panic!() };
+        assert!(matches!(**l, Expr::Binary(BinaryOp::RegexMatch, _, _)));
     }
 
     #[test]
@@ -933,6 +1121,44 @@ mod tests {
             Statement::Admin(AdminCommand::CreateDatabase { name: "shop".into(), if_not_exists: true })
         );
         assert_eq!(one("use schema products"), Statement::Admin(AdminCommand::UseSchema("products".into())));
+    }
+
+    #[test]
+    fn constraint_commands() {
+        let unique = |name: Option<&str>, if_not_exists| {
+            Statement::Admin(AdminCommand::CreateConstraint {
+                name: name.map(str::to_string),
+                label: "User".into(),
+                key: "email".into(),
+                kind: ConstraintKind::Unique,
+                if_not_exists,
+            })
+        };
+        assert_eq!(
+            one("CREATE CONSTRAINT u IF NOT EXISTS FOR (n:User) REQUIRE n.email IS UNIQUE"),
+            unique(Some("u"), true)
+        );
+        assert_eq!(one("CREATE CONSTRAINT FOR (n:User) REQUIRE (n.email) IS UNIQUE"), unique(None, false));
+        assert_eq!(one("CREATE CONSTRAINT ON (n:User) ASSERT n.email IS UNIQUE"), unique(None, true));
+        let Statement::Admin(AdminCommand::CreateConstraint { kind, .. }) =
+            one("CREATE CONSTRAINT ON (n:User) ASSERT EXISTS (n.email)")
+        else {
+            panic!()
+        };
+        assert_eq!(kind, ConstraintKind::NotNull);
+        let Statement::Admin(AdminCommand::CreateConstraint { kind, .. }) =
+            one("CREATE CONSTRAINT FOR (n:User) REQUIRE n.email IS NOT NULL")
+        else {
+            panic!()
+        };
+        assert_eq!(kind, ConstraintKind::NotNull);
+        assert_eq!(
+            one("DROP CONSTRAINT u IF EXISTS"),
+            Statement::Admin(AdminCommand::DropConstraint { name: "u".into(), if_exists: true })
+        );
+        assert_eq!(one("SHOW CONSTRAINTS"), Statement::Admin(AdminCommand::ShowConstraints));
+        assert!(parse("CREATE CONSTRAINT FOR (n:User) REQUIRE m.email IS UNIQUE").is_err());
+        assert!(parse("CREATE CONSTRAINT FOR (n:User) REQUIRE (n.a, n.b) IS UNIQUE").is_err());
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub enum Tok {
     Le,
     Gt,
     Ge,
+    /// `=~`
+    RegexMatch,
     Eof,
 }
 
@@ -193,9 +195,11 @@ impl Lexer<'_> {
             }
             '=' => {
                 if self.peek(0) == Some('~') {
-                    return Err(syntax("regular expressions (=~) are not supported yet", line, column));
+                    self.bump();
+                    Tok::RegexMatch
+                } else {
+                    Tok::Eq
                 }
-                Tok::Eq
             }
             '<' => match self.peek(0) {
                 Some('=') => {
@@ -358,6 +362,21 @@ mod tests {
                 Tok::Neq,
                 Tok::Le,
                 Tok::QuotedIdent("a b".into()),
+                Tok::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_regex_match() {
+        assert_eq!(
+            toks("a =~ 'x' = b"),
+            vec![
+                Tok::Ident("a".into()),
+                Tok::RegexMatch,
+                Tok::Str("x".into()),
+                Tok::Eq,
+                Tok::Ident("b".into()),
                 Tok::Eof
             ]
         );

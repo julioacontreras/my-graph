@@ -181,6 +181,48 @@ pub enum Change {
         label: String,
         key: String,
     },
+    /// Creates a constraint on `(label, key)` after checking the existing nodes.
+    /// A `Unique` constraint needs a property index on the same pair.
+    CreateConstraint {
+        name: String,
+        label: String,
+        key: String,
+        kind: ConstraintKind,
+        /// The index was created for this constraint and is dropped with it.
+        owns_index: bool,
+    },
+    DropConstraint {
+        name: String,
+    },
+}
+
+/// What a constraint requires of the nodes carrying its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ConstraintKind {
+    /// No two nodes share a value of the property.
+    Unique,
+    /// Every node has the property.
+    NotNull,
+}
+
+impl ConstraintKind {
+    /// Name used by `SHOW CONSTRAINTS`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConstraintKind::Unique => "UNIQUE",
+            ConstraintKind::NotNull => "NOT NULL",
+        }
+    }
+}
+
+/// A constraint, as listed by `SHOW CONSTRAINTS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstraintInfo {
+    pub name: String,
+    pub label: String,
+    pub key: String,
+    pub kind: ConstraintKind,
+    pub owns_index: bool,
 }
 
 /// Hashable form of an indexable property value. Values that are equal under
@@ -320,6 +362,8 @@ pub struct Graph {
     rel_type_index: HashMap<RelTypeId, BTreeSet<RelId>>,
     /// Property indexes, grouped by label so node changes find theirs quickly.
     prop_index: HashMap<LabelId, BTreeMap<String, PropIndex>>,
+    /// Constraints by name.
+    constraints: BTreeMap<String, ConstraintInfo>,
     /// Results of shortest-path searches, kept valid by [`Graph::apply`].
     path_cache: SharedPathCache,
 }
@@ -375,6 +419,7 @@ impl Graph {
             label_index: HashMap::new(),
             rel_type_index: HashMap::new(),
             prop_index: HashMap::new(),
+            constraints: BTreeMap::new(),
             path_cache: SharedPathCache::default(),
         }
     }
@@ -545,6 +590,114 @@ impl Graph {
     /// The `(label, key)` of the index called `name`.
     pub fn index_by_name(&self, name: &str) -> Option<(String, String)> {
         self.indexes().into_iter().find(|i| i.name == name).map(|i| (i.label, i.key))
+    }
+
+    /// Every constraint, ordered by name.
+    pub fn constraints(&self) -> Vec<ConstraintInfo> {
+        self.constraints.values().cloned().collect()
+    }
+
+    pub fn constraint(&self, name: &str) -> Option<&ConstraintInfo> {
+        self.constraints.get(name)
+    }
+
+    /// The name of a constraint of `kind` on `(label, key)`, if there is one.
+    pub fn constraint_on(&self, label: &str, key: &str, kind: ConstraintKind) -> Option<&str> {
+        self.constraints.values().find(|c| c.label == label && c.key == key && c.kind == kind).map(|c| c.name.as_str())
+    }
+
+    /// Names of the labels that at least one node carries, sorted.
+    pub fn label_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .label_index
+            .iter()
+            .filter(|(_, set)| !set.is_empty())
+            .map(|(l, _)| self.labels.name(*l).to_string())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Names of the relationship types that at least one relationship has, sorted.
+    pub fn rel_type_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .rel_type_index
+            .iter()
+            .filter(|(_, set)| !set.is_empty())
+            .map(|(t, _)| self.rel_types.name(*t).to_string())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Every property key ever stored in this graph, sorted.
+    pub fn property_keys(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.prop_keys.names().map(str::to_string).collect();
+        out.sort();
+        out
+    }
+
+    /// Checks the constraints against the nodes touched by `changes` (the
+    /// changes of one statement). Checking after the whole statement lets a
+    /// statement swap two unique values.
+    pub fn check_constraints(&self, changes: &[Change]) -> Result<()> {
+        if self.constraints.is_empty() {
+            return Ok(());
+        }
+        let mut seen: IdSet<NodeId> = IdSet::default();
+        for change in changes {
+            let id = match change {
+                Change::CreateNode { id, .. } | Change::SetNodeProperty { id, .. } | Change::AddLabel { id, .. } => *id,
+                _ => continue,
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(node) = self.nodes.get(&id) else { continue };
+            for c in self.constraints.values() {
+                let Some(lid) = self.labels.get(&c.label) else { continue };
+                if node.labels.contains(&lid) {
+                    self.check_node(c, lid, id, node.properties.get(&c.key))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks one node against one constraint on its label.
+    fn check_node(&self, c: &ConstraintInfo, lid: LabelId, id: NodeId, value: Option<&Value>) -> Result<()> {
+        let violation = |what: String| {
+            Err(MyGraphError::ConstraintViolation(format!(
+                "node {id} {what} (constraint `{}`: :{}({}) {})",
+                c.name,
+                c.label,
+                c.key,
+                c.kind.as_str()
+            )))
+        };
+        match (c.kind, value) {
+            (ConstraintKind::NotNull, None) => violation(format!("has no property `{}`", c.key)),
+            (ConstraintKind::NotNull, Some(_)) | (ConstraintKind::Unique, None) => Ok(()),
+            (ConstraintKind::Unique, Some(v)) => {
+                let Some(k) = IndexKey::from_value(v) else {
+                    return violation(format!(
+                        "has a {} in `{}`, which a unique constraint cannot check",
+                        v.type_name(),
+                        c.key
+                    ));
+                };
+                let shared = self
+                    .prop_index
+                    .get(&lid)
+                    .and_then(|m| m.get(&c.key))
+                    .and_then(|idx| idx.entries.get(&k))
+                    .map_or(0, Postings::len);
+                if shared > 1 {
+                    return violation(format!("has the value {v} in `{}`, which another node already has", c.key));
+                }
+                Ok(())
+            }
+        }
     }
 
     fn index_node(&mut self, label: LabelId, id: NodeId) {
@@ -775,10 +928,59 @@ impl Graph {
                 Ok(Some(Change::DropIndex { label: label.clone(), key: key.clone() }))
             }
             Change::DropIndex { label, key } => {
+                if let Some(name) = self.constraint_on(label, key, ConstraintKind::Unique) {
+                    return Err(MyGraphError::Execution(format!(
+                        "index on :{label}({key}) is used by constraint `{name}`; drop the constraint first"
+                    )));
+                }
                 let removed =
                     self.labels.get(label).and_then(|l| self.prop_index.get_mut(&l)).and_then(|m| m.remove(key));
                 let idx = removed.ok_or_else(|| MyGraphError::NotFound(format!("index on :{label}({key})")))?;
                 Ok(Some(Change::CreateIndex { name: idx.name, label: label.clone(), key: key.clone() }))
+            }
+            Change::CreateConstraint { name, label, key, kind, owns_index } => {
+                if self.constraints.contains_key(name) {
+                    return Err(MyGraphError::AlreadyExists(format!("constraint `{name}`")));
+                }
+                if let Some(other) = self.constraint_on(label, key, *kind) {
+                    return Err(MyGraphError::AlreadyExists(format!(
+                        "constraint `{other}` on :{label}({key}) {}",
+                        kind.as_str()
+                    )));
+                }
+                if *kind == ConstraintKind::Unique && !self.has_index(label, key) {
+                    return Err(MyGraphError::Execution(format!(
+                        "a unique constraint needs an index on :{label}({key})"
+                    )));
+                }
+                let info = ConstraintInfo {
+                    name: name.clone(),
+                    label: label.clone(),
+                    key: key.clone(),
+                    kind: *kind,
+                    owns_index: *owns_index,
+                };
+                if let Some(lid) = self.labels.get(label) {
+                    for nid in self.label_index.get(&lid).into_iter().flatten() {
+                        let value = self.nodes.get(nid).and_then(|n| n.properties.get(key));
+                        self.check_node(&info, lid, *nid, value)?;
+                    }
+                }
+                self.constraints.insert(name.clone(), info);
+                Ok(Some(Change::DropConstraint { name: name.clone() }))
+            }
+            Change::DropConstraint { name } => {
+                let c = self
+                    .constraints
+                    .remove(name)
+                    .ok_or_else(|| MyGraphError::NotFound(format!("constraint `{name}`")))?;
+                Ok(Some(Change::CreateConstraint {
+                    name: c.name,
+                    label: c.label,
+                    key: c.key,
+                    kind: c.kind,
+                    owns_index: c.owns_index,
+                }))
             }
         }
     }
@@ -849,6 +1051,69 @@ mod tests {
         assert_eq!(recreate, create);
         g.apply(&recreate).unwrap();
         assert_eq!(g.indexes()[0].entries, 2);
+    }
+
+    #[test]
+    fn constraint_changes_are_invertible() {
+        let mut g = Graph::new(0);
+        g.apply(&create_node(1, "User")).unwrap();
+        let unique = Change::CreateConstraint {
+            name: "u".into(),
+            label: "User".into(),
+            key: "name".into(),
+            kind: ConstraintKind::Unique,
+            owns_index: false,
+        };
+        assert!(g.apply(&unique).is_err(), "a unique constraint needs an index");
+        g.apply(&Change::CreateIndex { name: "i".into(), label: "User".into(), key: "name".into() }).unwrap();
+        let inv = g.apply(&unique).unwrap().unwrap();
+        assert_eq!(inv, Change::DropConstraint { name: "u".into() });
+        assert!(g.apply(&Change::DropIndex { label: "User".into(), key: "name".into() }).is_err());
+
+        // Both nodes are named "x".
+        let second = create_node(2, "User");
+        g.apply(&second).unwrap();
+        assert!(matches!(g.check_constraints(&[second]), Err(MyGraphError::ConstraintViolation(_))));
+        assert!(g.check_constraints(&[create_node(1, "User")]).is_err(), "node 1 shares its value too");
+        g.apply(&Change::DeleteNode { id: 2 }).unwrap();
+
+        let recreate = g.apply(&inv).unwrap().unwrap();
+        assert_eq!(recreate, unique);
+        assert!(g.constraints().is_empty());
+        g.apply(&recreate).unwrap();
+        assert_eq!(g.constraint_on("User", "name", ConstraintKind::Unique), Some("u"));
+
+        let not_null = Change::CreateConstraint {
+            name: "n".into(),
+            label: "User".into(),
+            key: "age".into(),
+            kind: ConstraintKind::NotNull,
+            owns_index: false,
+        };
+        assert!(matches!(g.apply(&not_null), Err(MyGraphError::ConstraintViolation(_))));
+        assert_eq!(g.constraints().len(), 1, "a failed create changes nothing");
+    }
+
+    #[test]
+    fn lists_labels_types_and_keys() {
+        let mut g = Graph::new(0);
+        g.apply(&create_node(1, "B")).unwrap();
+        g.apply(&create_node(2, "A")).unwrap();
+        g.apply(&Change::CreateRelationship {
+            id: 1,
+            start: 1,
+            end: 2,
+            rel_type: "R".into(),
+            properties: PropertyMap::from([("w".into(), Value::from(1))]),
+        })
+        .unwrap();
+        assert_eq!(g.label_names(), vec!["A", "B"]);
+        assert_eq!(g.rel_type_names(), vec!["R"]);
+        assert_eq!(g.property_keys(), vec!["name", "w"]);
+        g.apply(&Change::DeleteRelationship { id: 1 }).unwrap();
+        g.apply(&Change::RemoveLabel { id: 1, label: "B".into(), ts: 2 }).unwrap();
+        assert_eq!(g.label_names(), vec!["A"], "labels without nodes are not listed");
+        assert!(g.rel_type_names().is_empty());
     }
 
     #[test]

@@ -124,6 +124,7 @@ spliced into the query text.
 | `CypherSyntaxError` | Invalid Cypher (`.line`, `.column`) |
 | `NotFoundError`, `AlreadyExistsError` | Unknown or duplicate database/schema |
 | `TransactionError` | e.g. COMMIT with no open transaction |
+| `ConstraintError` | A write broke a unique or not-null constraint; the statement was undone |
 | `QueryError` | Base class of the above; `.code` holds the engine error kind |
 | `ProtocolError` | The server or the client broke protocol v1 |
 | `ConnectionClosedError` | Cannot connect, or the connection was lost/closed |

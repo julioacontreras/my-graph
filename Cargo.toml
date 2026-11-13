@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -22,13 +22,14 @@ repository = "https://github.com/julioacontreras/my-graph"
 homepage = "https://julioacontreras.github.io/my-graph/"
 
 [workspace.dependencies]
-mygraph-core = { path = "crates/mygraph-core", version = "0.3.1" }
+mygraph-core = { path = "crates/mygraph-core", version = "0.4.0" }
 mygraph-cypher = { path = "crates/mygraph-cypher" }
 mygraph-storage = { path = "crates/mygraph-storage" }
 mygraph = { path = "crates/mygraph" }
-mygraph-protocol = { path = "crates/mygraph-protocol", version = "0.3.1" }
-mygraph-client = { path = "crates/mygraph-client", version = "0.3.1" }
+mygraph-protocol = { path = "crates/mygraph-protocol", version = "0.4.0" }
+mygraph-client = { path = "crates/mygraph-client", version = "0.4.0" }
 mygraph-server = { path = "crates/mygraph-server" }
 thiserror = "2"
 crc32fast = "1"
 tempfile = "3"
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }

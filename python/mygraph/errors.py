@@ -40,6 +40,11 @@ class AlreadyExistsError(QueryError):
     """A database or schema with that name already exists."""
 
 
+class ConstraintError(QueryError):
+    """A write broke a unique or not-null constraint. The statement was
+    undone; earlier statements of an open transaction are kept."""
+
+
 class TransactionError(QueryError):
     """Invalid transaction use, such as COMMIT with no open transaction."""
 
@@ -48,6 +53,7 @@ _BY_CODE: dict[str, type[QueryError]] = {
     "Syntax": CypherSyntaxError,
     "NotFound": NotFoundError,
     "AlreadyExists": AlreadyExistsError,
+    "ConstraintViolation": ConstraintError,
     "Transaction": TransactionError,
 }
 

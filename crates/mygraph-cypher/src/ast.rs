@@ -1,6 +1,7 @@
 //! Abstract syntax tree for the supported Cypher subset and MyGraph
 //! administrative extensions.
 
+pub use mygraph_core::ConstraintKind;
 use mygraph_core::Value;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +48,19 @@ pub enum AdminCommand {
         if_exists: bool,
     },
     ShowIndexes,
+    /// Node constraint on `(label, key)` in the current schema.
+    CreateConstraint {
+        name: Option<String>,
+        label: String,
+        key: String,
+        kind: ConstraintKind,
+        if_not_exists: bool,
+    },
+    DropConstraint {
+        name: String,
+        if_exists: bool,
+    },
+    ShowConstraints,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -55,28 +69,78 @@ pub enum IndexTarget {
     On { label: String, key: String },
 }
 
+/// A query: one or more single queries joined by `UNION` / `UNION ALL`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
+    pub parts: Vec<SingleQuery>,
+    /// `UNION ALL` keeps duplicate rows; plain `UNION` removes them.
+    /// Meaningless when there is only one part.
+    pub union_all: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SingleQuery {
     pub clauses: Vec<Clause>,
 }
 
 impl Query {
     pub fn is_read_only(&self) -> bool {
-        self.clauses.iter().all(|c| {
-            !matches!(c, Clause::Create { .. } | Clause::Set { .. } | Clause::Remove { .. } | Clause::Delete { .. })
+        self.parts.iter().flat_map(|p| &p.clauses).all(|c| {
+            !matches!(
+                c,
+                Clause::Create { .. }
+                    | Clause::Merge { .. }
+                    | Clause::Set { .. }
+                    | Clause::Remove { .. }
+                    | Clause::Delete { .. }
+            )
         })
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Clause {
-    Match { optional: bool, patterns: Vec<PathPattern>, filter: Option<Expr> },
-    Create { patterns: Vec<PathPattern> },
-    Set { items: Vec<SetItem> },
-    Remove { items: Vec<RemoveItem> },
-    Delete { detach: bool, exprs: Vec<Expr> },
-    Unwind { expr: Expr, variable: String },
-    With { projection: Projection, filter: Option<Expr> },
+    Match {
+        optional: bool,
+        patterns: Vec<PathPattern>,
+        filter: Option<Expr>,
+    },
+    Create {
+        patterns: Vec<PathPattern>,
+    },
+    /// `MERGE pattern [ON CREATE SET …] [ON MATCH SET …]`
+    Merge {
+        pattern: PathPattern,
+        on_create: Vec<SetItem>,
+        on_match: Vec<SetItem>,
+    },
+    Set {
+        items: Vec<SetItem>,
+    },
+    Remove {
+        items: Vec<RemoveItem>,
+    },
+    Delete {
+        detach: bool,
+        exprs: Vec<Expr>,
+    },
+    Unwind {
+        expr: Expr,
+        variable: String,
+    },
+    /// `CALL procedure(args) [YIELD …] [WHERE …]`
+    Call {
+        procedure: String,
+        args: Vec<Expr>,
+        /// `(output column, alias)`; `None` for no `YIELD` or `YIELD *`,
+        /// which yields every output column under its own name.
+        yields: Option<Vec<(String, Option<String>)>>,
+        filter: Option<Expr>,
+    },
+    With {
+        projection: Projection,
+        filter: Option<Expr>,
+    },
     Return(Projection),
 }
 
@@ -247,6 +311,8 @@ pub enum BinaryOp {
     StartsWith,
     EndsWith,
     Contains,
+    /// `=~`: the whole string matches a regular expression.
+    RegexMatch,
 }
 
 pub const AGGREGATE_FUNCTIONS: &[&str] = &["count", "sum", "avg", "min", "max", "collect"];

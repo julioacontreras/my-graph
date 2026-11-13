@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+Cypher gains `MERGE`, `UNION`, constraints, `CALL` procedures and regular
+expressions.
+
+Upgrade notes: 0.4.0 reads the data of every earlier version. It writes
+snapshot format 3, and its WAL can hold constraint changes, so 0.3 cannot
+read data written by 0.4. Back up the data directory before upgrading.
 
 ### Added
 
@@ -11,10 +18,29 @@
   keep the connection, from connection and protocol errors.
 - `mygraph-core` and `mygraph-protocol` are published too, as dependencies
   of the client.
+- Cypher `MERGE` with `ON CREATE SET` / `ON MATCH SET`: finds the whole
+  pattern or creates it. Rows merged earlier in the same clause are found,
+  so `UNWIND` + `MERGE` does not create duplicates.
+- Cypher `UNION` and `UNION ALL`.
+- Regular expressions: `s =~ 'pattern'` matches the whole string, with the
+  syntax of the Rust `regex` crate (linear time, `(?i)` and other flags).
+- Constraints on a node label and property: `CREATE CONSTRAINT [name]
+  [IF NOT EXISTS] FOR (n:L) REQUIRE n.p IS UNIQUE | IS NOT NULL` (and the
+  Memgraph `ON (n:L) ASSERT ...` form), `DROP CONSTRAINT`, `SHOW
+  CONSTRAINTS`. They are checked at the end of each statement; a violation
+  undoes the statement and returns the new error code `ConstraintViolation`
+  (`ConstraintError` in Python, `QueryError::is_constraint_violation()` in
+  the Rust client).
+- `CALL` with built-in procedures: `db.labels()`, `db.relationshipTypes()`,
+  `db.propertyKeys()`, `db.indexes()`, `db.constraints()`,
+  `dbms.procedures()`, with `YIELD ... [AS ...]` and `WHERE`.
 
 ### Changed
 
 - The `mygraph` CLI uses `mygraph-client` to talk to a server.
+- Snapshot format version 3 (adds constraints). Versions 1 and 2 are still
+  read. WAL records with constraint changes cannot be read by older
+  versions.
 
 ## 0.3.1
 

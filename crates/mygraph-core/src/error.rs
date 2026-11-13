@@ -19,6 +19,8 @@ pub enum MyGraphError {
     InvalidName(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    #[error("constraint violation: {0}")]
+    ConstraintViolation(String),
     #[error("transaction error: {0}")]
     Transaction(String),
     #[error("storage error: {0}")]

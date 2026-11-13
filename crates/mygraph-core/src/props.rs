@@ -26,6 +26,11 @@ impl KeyInterner {
         self.keys.insert(Arc::clone(&k));
         k
     }
+
+    /// Every key interned so far, in no particular order.
+    pub fn names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.keys.iter().map(|k| &**k)
+    }
 }
 
 /// The properties of a stored node or relationship, sorted by key.

@@ -19,7 +19,7 @@ pub enum Error {
 pub struct QueryError {
     /// Engine error kind: `Syntax`, `Semantic`, `Type`, `Execution`,
     /// `NotFound`, `AlreadyExists`, `InvalidName`, `Unsupported`,
-    /// `Transaction`, `Storage`, `Corruption` or `Io`.
+    /// `ConstraintViolation`, `Transaction`, `Storage`, `Corruption` or `Io`.
     pub code: String,
     pub message: String,
     /// Position of a syntax error (1-based).
@@ -38,6 +38,11 @@ impl QueryError {
 
     pub fn is_already_exists(&self) -> bool {
         self.code == "AlreadyExists"
+    }
+
+    /// A write broke a unique or not-null constraint; the statement was undone.
+    pub fn is_constraint_violation(&self) -> bool {
+        self.code == "ConstraintViolation"
     }
 
     pub fn is_transaction(&self) -> bool {

@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 
 import mygraph
-from mygraph import CypherSyntaxError, Node, NotFoundError, Relationship, TransactionError
+from mygraph import ConstraintError, CypherSyntaxError, Node, NotFoundError, Relationship, TransactionError
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -185,6 +185,21 @@ class ServerTest(unittest.TestCase):
         with self.assertRaises(NotFoundError):
             self.db.use_database("does_not_exist")
         self.db.ping()  # connection still usable
+
+    def test_constraint_violation(self):
+        self.db.run("CREATE CONSTRAINT FOR (u:User) REQUIRE u.email IS UNIQUE")
+        self.db.run("MERGE (:User {email: 'a'})")
+        with self.assertRaises(ConstraintError) as ctx:
+            self.db.run("CREATE (:User {email: 'a'})")
+        self.assertEqual(ctx.exception.code, "ConstraintViolation")
+        self.assertEqual(self.db.run("MATCH (u:User) RETURN count(u) AS n").single()["n"], 1)
+
+    def test_v04_cypher(self):
+        r = self.db.run("UNWIND ['a', 'b', 'a'] AS x MERGE (t:Tag {name: x}) RETURN count(*) AS n")
+        self.assertEqual(r.stats.nodes_created, 2)
+        r = self.db.run("MATCH (t:Tag) WHERE t.name =~ '[a-z]' RETURN t.name AS n UNION RETURN 'a' AS n")
+        self.assertEqual(sorted(rec["n"] for rec in r.records()), ["a", "b"])
+        self.assertEqual([rec["label"] for rec in self.db.run("CALL db.labels()").records()], ["Tag"])
 
     def test_use_database_is_per_connection(self):
         other = mygraph.connect("127.0.0.1", self.port)

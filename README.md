@@ -311,10 +311,15 @@ per record.
 // Create nodes and a relationship in one pattern
 CREATE (a:User {name: 'Alice', age: 30})-[:KNOWS {since: 2020}]->(b:User {name: 'Bob', age: 25})
 
-// Index the lookup key, then connect existing nodes (there is no MERGE: run MATCH first to avoid duplicates)
+// Index the lookup key, then connect existing nodes
 CREATE INDEX FOR (u:User) ON (u.name)
 MATCH (a:User {name: 'Alice'}), (c:User {name: 'Carol'}) CREATE (a)-[:KNOWS]->(c)
 UNWIND $edges AS e MATCH (a:User {name: e.from}), (b:User {name: e.to}) CREATE (a)-[:KNOWS]->(b)
+
+// Upsert: MERGE finds the whole pattern or creates it
+MERGE (u:User {name: $name}) ON CREATE SET u.created = timestamp() ON MATCH SET u.seen = timestamp()
+MATCH (a:User {name: 'Alice'}), (c:User {name: 'Carol'}) MERGE (a)-[:KNOWS]->(c)
+UNWIND $rows AS r MERGE (c:City {name: r.city})
 
 // Read with a filter, ordering and paging
 MATCH (u:User) WHERE u.age >= 18 AND u.name STARTS WITH 'A'
@@ -352,6 +357,21 @@ MATCH (u:User {name: 'Bob'}) DETACH DELETE u
 // Lists
 UNWIND [1, 2, 3] AS x RETURN x * 2 AS y
 
+// Regular expressions match the whole string; (?i) ignores case
+MATCH (u:User) WHERE u.email =~ '(?i).*@example\\.com' RETURN u.name
+
+// Combine results (UNION removes duplicate rows, UNION ALL keeps them)
+MATCH (p:Person) RETURN p.name AS name UNION MATCH (c:Company) RETURN c.name AS name
+
+// Constraints
+CREATE CONSTRAINT user_email FOR (u:User) REQUIRE u.email IS UNIQUE
+CREATE CONSTRAINT FOR (u:User) REQUIRE u.name IS NOT NULL
+SHOW CONSTRAINTS; DROP CONSTRAINT user_email
+
+// Built-in procedures
+CALL db.labels()
+CALL db.labels() YIELD label WHERE label STARTS WITH 'U' RETURN label
+
 // Databases and schemas
 CREATE DATABASE shop; SHOW DATABASES; USE DATABASE shop; CREATE SCHEMA s1; USE SCHEMA s1; SHOW SCHEMAS
 ```
@@ -359,7 +379,8 @@ CREATE DATABASE shop; SHOW DATABASES; USE DATABASE shop; CREATE SCHEMA s1; USE S
 ### Operators and functions
 
 **Operators:** `= <> < <= > >=`, `AND OR XOR NOT`, `+ - * / % ^`,
-`IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `IS NULL`, `IS NOT NULL`,
+`IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS`, `=~` (regular expression,
+whole string, [`regex` syntax](https://docs.rs/regex/latest/regex/#syntax)), `IS NULL`, `IS NOT NULL`,
 `CASE WHEN ... THEN ... ELSE ... END`. Comments are `//` and `/* */`.
 Identifiers with spaces or reserved words go in backticks: `` `my label` ``.
 
@@ -376,11 +397,22 @@ Identifiers with spaces or reserved words go in backticks: `` `my label` ``.
 | Conversion | `toInteger`, `toFloat`, `toString`, `toBoolean`, `coalesce` |
 | Other | `length`, `timestamp` |
 
+**Procedures** (`CALL name()`, optionally `YIELD col [AS alias], ... [WHERE ...]`;
+on its own, a `CALL` returns every column):
+
+| Procedure | Columns |
+|---|---|
+| `db.labels()` | `label` (labels that at least one node has) |
+| `db.relationshipTypes()` | `relationshipType` |
+| `db.propertyKeys()` | `propertyKey` |
+| `db.indexes()` | `name`, `label`, `property`, `entries` |
+| `db.constraints()` | `name`, `type`, `label`, `property` |
+| `dbms.procedures()` | `name`, `signature`, `description` |
+
 > [!WARNING]
-> **Not supported in v0.3:** `MERGE` and regular expressions (`=~`) fail
-> with `syntax error ... not supported yet`. Constraints, composite indexes
-> and `CALL` / procedures fail with an ordinary syntax error. To do an
-> upsert, run `MATCH` first and `CREATE` only when it returns no rows.
+> **Not supported yet:** composite indexes and constraints, constraints on
+> relationships, `CALL { subquery }`, user-defined procedures, and `MERGE`
+> with several comma-separated patterns.
 
 ### Indexes: you create them
 
@@ -433,6 +465,33 @@ are the same key). Lists and maps are not indexed. A lookup with one of them
 falls back to a scan, and so does a lookup with an integer beyond ±2^53.
 Results are the same with or without an index, only the speed changes.
 
+### Constraints
+
+```cypher
+CREATE CONSTRAINT user_email FOR (u:User) REQUIRE u.email IS UNIQUE      // Neo4j syntax; name and IF NOT EXISTS optional
+CREATE CONSTRAINT FOR (u:User) REQUIRE u.name IS NOT NULL
+CREATE CONSTRAINT ON (u:User) ASSERT u.email IS UNIQUE                   // Memgraph syntax; does nothing if it exists
+CREATE CONSTRAINT ON (u:User) ASSERT EXISTS (u.name)
+SHOW CONSTRAINTS                                                         // name, type, label, property
+DROP CONSTRAINT user_email                                               // default name: constraint_<Label>_<property>_unique|not_null
+```
+
+- `UNIQUE`: no two `:User` nodes have the same `email` (`1` and `1.0` are
+  the same value). Nodes without the property are allowed. Lists, maps and
+  bytes cannot be stored in a unique property.
+- `NOT NULL`: every `:User` node has a `name`.
+- Constraints are checked at the end of each statement, so one statement
+  can swap two unique values. A statement that breaks one fails with a
+  `ConstraintViolation` error and changes nothing; in an explicit
+  transaction the earlier statements are kept.
+- Creating a constraint checks the existing nodes and fails if one breaks it.
+- A unique constraint uses the index on the same label and property, and
+  creates one with the constraint's name if there is none. That index is
+  dropped with the constraint, and an index a constraint uses cannot be
+  dropped on its own.
+- Like indexes, constraints belong to the current schema and are saved with
+  the data. `MERGE` on a unique key is a safe upsert.
+
 ### Shortest paths
 
 `shortestPath((a)-[*]->(b))` finds a path with the fewest relationships,
@@ -462,13 +521,14 @@ being updated, and results are always the same as without the cache.
 
 ## Status
 
-Current version: **v0.3**.
+Current version: **v0.4**.
 
 | Area | Implemented |
 |---|---|
 | Model | Directed property graph: nodes with multiple labels, typed relationships, properties (`null`, bool, int, float, string, bytes, list, map) |
 | Databases / schemas | Multiple databases with isolated schemas; `CREATE/DROP/USE DATABASE`, `CREATE/DROP/USE SCHEMA`, `SHOW DATABASES/SCHEMAS` |
-| Cypher | `MATCH`, `OPTIONAL MATCH`, `WHERE`, variable-length relationships (`-[:T*1..5]->`), named paths (`p = ...`), `shortestPath` / `allShortestPaths`, `CREATE`, `SET` (`=`, `+=`, labels), `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` (`DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`), `count/sum/avg/min/max/collect`, `CASE`, parameters, scalar functions; errors carry line/column |
+| Cypher | `MATCH`, `OPTIONAL MATCH`, `WHERE`, variable-length relationships (`-[:T*1..5]->`), named paths (`p = ...`), `shortestPath` / `allShortestPaths`, `CREATE`, `MERGE` (`ON CREATE` / `ON MATCH`), `SET` (`=`, `+=`, labels), `REMOVE`, `DELETE`, `DETACH DELETE`, `UNWIND`, `WITH`, `RETURN` (`DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`), `UNION` / `UNION ALL`, `CALL` built-in procedures, `count/sum/avg/min/max/collect`, `CASE`, `=~` regular expressions, parameters, scalar functions; errors carry line/column |
+| Constraints | Unique and not-null constraints on a node label and property (`CREATE CONSTRAINT ... REQUIRE n.p IS UNIQUE` / `IS NOT NULL`, `DROP CONSTRAINT`, `SHOW CONSTRAINTS`), checked at the end of each statement |
 | Indexes and planning | Label and relationship-type indexes; property equality indexes (`CREATE INDEX FOR (n:L) ON (n.p)` or `CREATE INDEX ON :L(p)`, `DROP INDEX`, `SHOW INDEXES`), used by inline properties, `WHERE n.p = x` and `IN`; `id(n) = x` and `id(r) = x` lookups; each path starts from its most selective node or relationship and `WHERE` is checked as soon as its variables are bound |
 | Paths | Bidirectional breadth-first `shortestPath`, weighted `shortestPath(..., {weight: 'p'})` (bidirectional Dijkstra), `allShortestPaths`; per-schema cache of path searches with change-based invalidation |
 | Transactions | Auto-commit per statement; explicit transactions with commit/rollback (rollback on drop); statement-level atomicity; read-only scripts run concurrently |
@@ -478,7 +538,7 @@ Current version: **v0.3**.
 | Server | `mygraph-server start`: TCP, [protocol v1](PROTOCOL.md), one session per connection, explicit transactions |
 | Python client | [`python/`](python/README.md): `run(cypher)`, CRUD helpers for nodes/relationships, transactions; standard library only |
 
-**Not yet:** `MERGE`, `UNION`, range or composite indexes, a cost-based
+**Not yet:** range or composite indexes, composite constraints, a cost-based
 planner, MVCC/concurrent writers, page-based storage, authentication
 (`AUTH` is accepted but not checked), TLS, import/export, security.
 

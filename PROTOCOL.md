@@ -93,8 +93,8 @@ Notes:
 ### Error codes
 
 `Syntax` (with `line` / `column`), `Semantic`, `Type`, `Execution`, `NotFound`,
-`AlreadyExists`, `InvalidName`, `Unsupported`, `Transaction`, `Storage`,
-`Corruption`, `Io`. These are the `MyGraphError` variants. `Protocol` means
+`AlreadyExists`, `InvalidName`, `Unsupported`, `ConstraintViolation`,
+`Transaction`, `Storage`, `Corruption`, `Io`. These are the `MyGraphError` variants. `Protocol` means
 the request itself was malformed.
 
 ## Concurrency in v0.1
