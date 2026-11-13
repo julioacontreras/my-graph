@@ -8,6 +8,7 @@ members = [
     "crates/mygraph-cli",
     "crates/mygraph-protocol",
     "crates/mygraph-server",
+    "crates/mygraph-client",
 ]
 
 [workspace.package]
@@ -15,13 +16,19 @@ version = "0.3.1"
 edition = "2021"
 rust-version = "1.89"
 publish = false
+authors = ["Julio Contreras"]
+license = "MIT"
+repository = "https://github.com/julioacontreras/my-graph"
+homepage = "https://julioacontreras.github.io/my-graph/"
 
 [workspace.dependencies]
-mygraph-core = { path = "crates/mygraph-core" }
+mygraph-core = { path = "crates/mygraph-core", version = "0.3.1" }
 mygraph-cypher = { path = "crates/mygraph-cypher" }
 mygraph-storage = { path = "crates/mygraph-storage" }
 mygraph = { path = "crates/mygraph" }
-mygraph-protocol = { path = "crates/mygraph-protocol" }
+mygraph-protocol = { path = "crates/mygraph-protocol", version = "0.3.1" }
+mygraph-client = { path = "crates/mygraph-client", version = "0.3.1" }
+mygraph-server = { path = "crates/mygraph-server" }
 thiserror = "2"
 crc32fast = "1"
 tempfile = "3"

@@ -13,6 +13,7 @@
   <a href="https://github.com/julioacontreras/my-graph/actions/workflows/docker.yml"><img alt="Docker image" src="https://github.com/julioacontreras/my-graph/actions/workflows/docker.yml/badge.svg"></a>
   <a href="https://hub.docker.com/r/julioacontreras/mygraph"><img alt="Docker pulls" src="https://img.shields.io/docker/pulls/julioacontreras/mygraph"></a>
   <a href="https://pypi.org/project/mygraph-client/"><img alt="PyPI" src="https://img.shields.io/pypi/v/mygraph-client?label=mygraph-client"></a>
+  <a href="https://crates.io/crates/mygraph-client"><img alt="crates.io" src="https://img.shields.io/crates/v/mygraph-client?label=mygraph-client"></a>
   <a href="rust-toolchain.toml"><img alt="Rust 1.89+" src="https://img.shields.io/badge/rust-1.89%2B-orange"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
@@ -32,7 +33,7 @@
 MyGraph stores a directed property graph (labelled nodes, typed
 relationships, properties) with a write-ahead log and crash recovery. You
 can embed it in a Rust program or run it as a server and talk to it from
-the `mygraph` CLI, the Python client, or any client that speaks
+the `mygraph` CLI, the Python or Rust client, or any client that speaks
 [protocol v1](PROTOCOL.md).
 
 > [!TIP]
@@ -58,6 +59,7 @@ the `mygraph` CLI, the Python client, or any client that speaks
 |---|---|---|
 | Server (Docker image, amd64 + arm64) | Docker Hub [`julioacontreras/mygraph`](https://hub.docker.com/r/julioacontreras/mygraph), also `ghcr.io/julioacontreras/mygraph` | `docker pull julioacontreras/mygraph:latest` |
 | Python client + `mygraph-client` command | PyPI [`mygraph-client`](https://pypi.org/project/mygraph-client/) | `pip install mygraph-client` |
+| Rust client | crates.io [`mygraph-client`](https://crates.io/crates/mygraph-client) ([guide](crates/mygraph-client/README.md)) | `cargo add mygraph-client` |
 | Rust CLI `mygraph` | this repository | `cargo install --git https://github.com/julioacontreras/my-graph.git mygraph-cli` |
 
 ### Server
@@ -533,6 +535,35 @@ repository variable `DOCKERHUB_USERNAME` and the secret `DOCKERHUB_TOKEN`.
 
 To build the image locally: `docker build -t mygraph:dev .`
 
+### Rust client (crates.io)
+
+The workflow [`.github/workflows/crates.yml`](.github/workflows/crates.yml)
+publishes `mygraph-core`, `mygraph-protocol` and `mygraph-client` (in that
+order) with the workspace version when a tag `rs-vX.Y.Z` is pushed. It uses
+crates.io trusted publishing, so no token is stored in GitHub.
+
+One-time setup:
+
+1. Sign in to [crates.io](https://crates.io) with GitHub and verify your
+   email in **Account Settings**.
+2. The first release must be done by hand, because trusted publishing can
+   only be set up for crates that already exist. Create an API token in
+   **Account Settings → API Tokens** (scopes `publish-new` and
+   `publish-update`), then:
+
+   ```bash
+   cargo login            # paste the token
+   cargo publish -p mygraph-core -p mygraph-protocol -p mygraph-client
+   ```
+
+3. For each of the three crates, open **Settings → Trusted Publishing** on
+   crates.io and add the GitHub repository `julioacontreras/my-graph`,
+   workflow `crates.yml`, environment `crates-io`.
+
+Later releases: bump the workspace version, then `git tag rs-v0.3.2 && git push origin rs-v0.3.2`.
+A version can never be published twice, and published code cannot be
+deleted (only yanked).
+
 ### Python client (PyPI)
 
 See [python/README.md](python/README.md#releasing-to-pypi). It has its own
@@ -547,9 +578,10 @@ changes, so the client can read the new values.
 | `mygraph-cypher` | Lexer, parser, AST, semantic checks, executor | core |
 | `mygraph-storage` | Binary format, WAL, snapshots, recovery | core |
 | `mygraph` | Public embedded API | core, cypher, storage |
-| `mygraph-cli` | `mygraph` binary | mygraph |
+| `mygraph-cli` | `mygraph` binary | mygraph, client |
 | `mygraph-protocol` | Wire protocol v1: frames, value codec, messages | core |
 | `mygraph-server` | `mygraph-server` binary (TCP) | mygraph, protocol |
+| `mygraph-client` | Rust client for the server (published on crates.io) | core, protocol |
 
 All mutations are invertible `Change` records applied through one entry point
 (`Graph::apply`). The same records are the redo log written to the WAL and,

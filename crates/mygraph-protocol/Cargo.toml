@@ -4,7 +4,13 @@ description = "MyGraph wire protocol v1: framing, value codec and messages"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish.workspace = true
+publish = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["graph", "database", "mygraph", "protocol"]
+categories = ["database"]
 
 [dependencies]
 mygraph-core.workspace = true

@@ -9,8 +9,6 @@
 //! `--port` the CLI connects to a running `mygraph-server` instead
 //! (defaults: localhost, 6660).
 
-mod remote;
-
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -115,10 +113,12 @@ fn run_remote(args: &Args, host: &str, port: u16) -> ExitCode {
         eprintln!("unknown command `{}`\n{USAGE}", args.command);
         return ExitCode::from(2);
     }
-    let mut client = match remote::Client::connect(host, port) {
+    let options =
+        mygraph_client::ConnectOptions::default().client_name(concat!("mygraph-cli/", env!("CARGO_PKG_VERSION")));
+    let mut client = match mygraph_client::Client::connect_with((host, port), options) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: cannot connect to {host}:{port}: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -126,12 +126,12 @@ fn run_remote(args: &Args, host: &str, port: u16) -> ExitCode {
         remote_shell(&mut client, host, port);
         ExitCode::SUCCESS
     } else {
-        match client.query(&args.rest.join(" ")) {
+        match client.run(&args.rest.join(" ")) {
             Ok(reply) => {
                 if args.json {
-                    println!("{}", to_json(&reply.result));
+                    println!("{}", to_json(&to_local(&reply)));
                 } else {
-                    print!("{}", render_table(&reply.result));
+                    print!("{}", render_table(&to_local(&reply)));
                 }
                 ExitCode::SUCCESS
             }
@@ -145,14 +145,14 @@ fn run_remote(args: &Args, host: &str, port: u16) -> ExitCode {
     code
 }
 
-fn remote_shell(client: &mut remote::Client, host: &str, port: u16) {
+fn remote_shell(client: &mut mygraph_client::Client, host: &str, port: u16) {
     println!("MyGraph v{} (connected to {host}:{port})", env!("CARGO_PKG_VERSION"));
     println!("End statements with `;`. Type EXIT; to quit.");
     let stdin = io::stdin();
     let mut lines = stdin.lock().lines();
     let mut location = String::from("?");
     let mut in_tx = false;
-    if let Ok(r) = client.query("RETURN 1") {
+    if let Ok(r) = client.run("RETURN 1") {
         location = format!("{}/{}", r.database, r.schema);
     }
     let mut buffer = String::new();
@@ -176,9 +176,9 @@ fn remote_shell(client: &mut remote::Client, host: &str, port: u16) {
             break;
         }
         let started = Instant::now();
-        match client.query(&stmt) {
+        match client.run(&stmt) {
             Ok(reply) => {
-                let r = &reply.result;
+                let r = &to_local(&reply);
                 if r.columns.is_empty() && !r.stats.contains_updates() {
                     println!("OK");
                 } else {
@@ -194,6 +194,21 @@ fn remote_shell(client: &mut remote::Client, host: &str, port: u16) {
     if in_tx {
         println!("open transaction rolled back by the server");
     }
+}
+
+/// Converts a server reply into the embedded result type the renderers use.
+fn to_local(r: &mygraph_client::QueryResult) -> QueryResult {
+    let s = &r.stats;
+    let stats = mygraph::QueryStats {
+        nodes_created: s.nodes_created,
+        nodes_deleted: s.nodes_deleted,
+        relationships_created: s.relationships_created,
+        relationships_deleted: s.relationships_deleted,
+        properties_set: s.properties_set,
+        labels_added: s.labels_added,
+        labels_removed: s.labels_removed,
+    };
+    QueryResult { columns: r.columns.clone(), rows: r.rows.clone(), stats }
 }
 
 fn shell(db: &Database, data: Option<&str>) {

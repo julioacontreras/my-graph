@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [[bin]]
 name = "mygraph"
@@ -12,4 +16,4 @@ path = "src/main.rs"
 
 [dependencies]
 mygraph.workspace = true
-mygraph-protocol.workspace = true
+mygraph-client.workspace = true

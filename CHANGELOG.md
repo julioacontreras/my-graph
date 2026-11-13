@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Rust client crate `mygraph-client`, published on crates.io
+  (`cargo add mygraph-client`): connect with timeouts and auth, queries
+  with parameters (`params!`), transactions (rolled back when dropped),
+  ping, and database/schema helpers. Errors separate query errors, which
+  keep the connection, from connection and protocol errors.
+- `mygraph-core` and `mygraph-protocol` are published too, as dependencies
+  of the client.
+
+### Changed
+
+- The `mygraph` CLI uses `mygraph-client` to talk to a server.
+
 ## 0.3.1
 
 About half the memory for large graphs. A tree of 1,082,401 nodes and

@@ -1,0 +1,23 @@
+[package]
+name = "mygraph-client"
+description = "Rust client for the MyGraph graph database server (protocol v1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/mygraph-client"
+readme = "README.md"
+keywords = ["graph", "database", "cypher", "client", "mygraph"]
+categories = ["database"]
+
+[dependencies]
+mygraph-core.workspace = true
+mygraph-protocol.workspace = true
+
+[dev-dependencies]
+mygraph.workspace = true
+mygraph-server.workspace = true

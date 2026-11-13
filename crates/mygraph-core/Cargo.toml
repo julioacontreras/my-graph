@@ -4,7 +4,13 @@ description = "MyGraph core: graph model, values, catalog and write journal"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish.workspace = true
+publish = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["graph", "database", "mygraph", "cypher"]
+categories = ["database"]
 
 [dependencies]
 thiserror.workspace = true
