@@ -36,6 +36,12 @@ impl Journal {
         &self.redo
     }
 
+    /// Splits the journal into its redo log and its undo log (both in the
+    /// order the changes were applied), without copying them.
+    pub fn into_parts(self) -> (Vec<Change>, Vec<Change>) {
+        (self.redo, self.undo)
+    }
+
     /// A savepoint usable with [`Journal::rollback_to`].
     pub fn mark(&self) -> usize {
         self.redo.len()

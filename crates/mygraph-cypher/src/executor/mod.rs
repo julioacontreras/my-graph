@@ -346,8 +346,12 @@ impl Executor<'_> {
                     };
                     if matches!(item, SetItem::Replace { .. }) {
                         let existing: Vec<String> = match target {
-                            Val::Node(id) => env.graph.node(id).map(|n| n.properties.keys().cloned().collect()),
-                            Val::Rel(id) => env.graph.relationship(id).map(|r| r.properties.keys().cloned().collect()),
+                            Val::Node(id) => {
+                                env.graph.node(id).map(|n| n.properties.keys().map(str::to_string).collect())
+                            }
+                            Val::Rel(id) => {
+                                env.graph.relationship(id).map(|r| r.properties.keys().map(str::to_string).collect())
+                            }
                             _ => None,
                         }
                         .unwrap_or_default();

@@ -9,6 +9,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use crate::error::{MyGraphError, Result};
 use crate::path_cache::{CachedPaths, PathCache, PathKey, SharedPathCache};
+use crate::props::{KeyInterner, Properties};
 use crate::value::{NodeValue, PropertyMap, RelationshipValue, Value};
 
 pub type NodeId = u64;
@@ -80,7 +81,7 @@ pub struct Node {
     pub id: NodeId,
     pub schema_id: SchemaId,
     pub labels: Vec<LabelId>,
-    pub properties: PropertyMap,
+    pub properties: Properties,
     pub created_at: u64,
     pub updated_at: u64,
     outgoing: Vec<Adjacent>,
@@ -121,7 +122,7 @@ pub struct Relationship {
     pub start_node: NodeId,
     pub end_node: NodeId,
     pub rel_type: RelTypeId,
-    pub properties: PropertyMap,
+    pub properties: Properties,
 }
 
 /// An atomic, invertible graph mutation. Names (not interned ids) are used so
@@ -216,27 +217,82 @@ impl IndexKey {
     }
 }
 
+/// The nodes holding one indexed value. Most indexed keys are unique, so a
+/// single id is stored inline instead of in a `BTreeSet` (one tree node each).
+#[derive(Debug, Clone)]
+enum Postings {
+    One(NodeId),
+    Many(BTreeSet<NodeId>),
+}
+
+impl Postings {
+    fn insert(&mut self, id: NodeId) {
+        match self {
+            Postings::One(x) if *x == id => {}
+            Postings::One(x) => *self = Postings::Many(BTreeSet::from([*x, id])),
+            Postings::Many(set) => {
+                set.insert(id);
+            }
+        }
+    }
+
+    /// Removes `id`; returns `true` when no id is left.
+    fn remove(&mut self, id: NodeId) -> bool {
+        match self {
+            Postings::One(x) => *x == id,
+            Postings::Many(set) => {
+                set.remove(&id);
+                match set.len() {
+                    0 => true,
+                    1 => {
+                        *self = Postings::One(*set.first().expect("len 1"));
+                        false
+                    }
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Postings::One(_) => 1,
+            Postings::Many(set) => set.len(),
+        }
+    }
+
+    /// Ids in ascending order.
+    fn to_vec(&self) -> Vec<NodeId> {
+        match self {
+            Postings::One(x) => vec![*x],
+            Postings::Many(set) => set.iter().copied().collect(),
+        }
+    }
+}
+
 /// An equality index over one `(label, property)` pair.
 #[derive(Debug, Clone, Default)]
 struct PropIndex {
     name: String,
-    entries: HashMap<IndexKey, BTreeSet<NodeId>>,
+    entries: HashMap<IndexKey, Postings>,
 }
 
 impl PropIndex {
     fn insert(&mut self, value: &Value, id: NodeId) {
         if let Some(k) = IndexKey::from_value(value) {
-            self.entries.entry(k).or_default().insert(id);
+            match self.entries.entry(k) {
+                std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().insert(id),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(Postings::One(id));
+                }
+            }
         }
     }
 
     fn remove(&mut self, value: &Value, id: NodeId) {
         if let Some(k) = IndexKey::from_value(value) {
-            if let Some(set) = self.entries.get_mut(&k) {
-                set.remove(&id);
-                if set.is_empty() {
-                    self.entries.remove(&k);
-                }
+            if self.entries.get_mut(&k).is_some_and(|p| p.remove(id)) {
+                self.entries.remove(&k);
             }
         }
     }
@@ -258,6 +314,7 @@ pub struct Graph {
     relationships: IdMap<RelId, Relationship>,
     labels: Interner,
     rel_types: Interner,
+    prop_keys: KeyInterner,
     label_index: HashMap<LabelId, BTreeSet<NodeId>>,
     /// Relationship ids by type (automatic, like the label index).
     rel_type_index: HashMap<RelTypeId, BTreeSet<RelId>>,
@@ -314,6 +371,7 @@ impl Graph {
             relationships: IdMap::default(),
             labels: Interner::default(),
             rel_types: Interner::default(),
+            prop_keys: KeyInterner::default(),
             label_index: HashMap::new(),
             rel_type_index: HashMap::new(),
             prop_index: HashMap::new(),
@@ -446,7 +504,7 @@ impl Graph {
             _ => {}
         }
         let k = IndexKey::from_value(value)?;
-        Some(idx.entries.get(&k).map(|s| s.iter().copied().collect()).unwrap_or_default())
+        Some(idx.entries.get(&k).map(Postings::to_vec).unwrap_or_default())
     }
 
     /// How many ids [`Graph::nodes_by_property`] would return, without
@@ -463,7 +521,7 @@ impl Graph {
             _ => {}
         }
         let k = IndexKey::from_value(value)?;
-        Some(idx.entries.get(&k).map_or(0, BTreeSet::len))
+        Some(idx.entries.get(&k).map_or(0, Postings::len))
     }
 
     /// Every property index, ordered by label then key.
@@ -476,7 +534,7 @@ impl Graph {
                     name: idx.name.clone(),
                     label: self.labels.name(*l).to_string(),
                     key: k.clone(),
-                    entries: idx.entries.values().map(BTreeSet::len).sum(),
+                    entries: idx.entries.values().map(Postings::len).sum(),
                 })
             })
             .collect();
@@ -499,7 +557,7 @@ impl Graph {
         }
     }
 
-    fn unindex_node(&mut self, label: LabelId, id: NodeId, props: &PropertyMap) {
+    fn unindex_node(&mut self, label: LabelId, id: NodeId, props: &Properties) {
         let Some(indexes) = self.prop_index.get_mut(&label) else { return };
         for (key, idx) in indexes.iter_mut() {
             if let Some(v) = props.get(key) {
@@ -520,7 +578,7 @@ impl Graph {
         self.nodes.get(&id).map(|n| NodeValue {
             id,
             labels: self.node_label_names(n),
-            properties: n.properties.clone(),
+            properties: n.properties.to_map(),
         })
     }
 
@@ -530,7 +588,7 @@ impl Graph {
             start_node: r.start_node,
             end_node: r.end_node,
             rel_type: self.rel_types.name(r.rel_type).to_string(),
-            properties: r.properties.clone(),
+            properties: r.properties.to_map(),
         })
     }
 
@@ -541,7 +599,7 @@ impl Graph {
                 if self.nodes.contains_key(id) {
                     return Err(MyGraphError::AlreadyExists(format!("node {id}")));
                 }
-                let properties = clean_properties(properties)?;
+                let properties = Properties::from_map(clean_properties(properties)?, &mut self.prop_keys);
                 let mut label_ids = Vec::with_capacity(labels.len());
                 for name in labels {
                     let lid = self.labels.intern(name);
@@ -585,7 +643,7 @@ impl Graph {
                 Ok(Some(Change::CreateNode {
                     id: *id,
                     labels: node.labels.iter().map(|l| self.labels.name(*l).to_string()).collect(),
-                    properties: node.properties,
+                    properties: node.properties.into_map(),
                     created_at: node.created_at,
                     updated_at: node.updated_at,
                 }))
@@ -600,7 +658,7 @@ impl Graph {
                 if !self.nodes.contains_key(end) {
                     return Err(node_not_found(*end));
                 }
-                let properties = clean_properties(properties)?;
+                let properties = Properties::from_map(clean_properties(properties)?, &mut self.prop_keys);
                 let type_id = self.rel_types.intern(rel_type);
                 let adj = |other| Adjacent { rel: *id, other, rel_type: type_id };
                 self.nodes.get_mut(start).expect("checked").outgoing.push(adj(*end));
@@ -637,14 +695,14 @@ impl Graph {
                     start: rel.start_node,
                     end: rel.end_node,
                     rel_type: self.rel_types.name(rel.rel_type).to_string(),
-                    properties: rel.properties,
+                    properties: rel.properties.into_map(),
                 }))
             }
             Change::SetNodeProperty { id, key, value, ts } => {
                 let value = normalize_value(key, value)?;
                 let node = self.nodes.get_mut(id).ok_or_else(|| node_not_found(*id))?;
                 let old = match &value {
-                    Some(v) => node.properties.insert(key.clone(), v.clone()),
+                    Some(v) => node.properties.insert(key, v.clone(), &mut self.prop_keys),
                     None => node.properties.remove(key),
                 };
                 let old_ts = std::mem::replace(&mut node.updated_at, *ts);
@@ -664,7 +722,7 @@ impl Graph {
                 let value = normalize_value(key, value)?;
                 let rel = self.relationships.get_mut(id).ok_or_else(|| rel_not_found(*id))?;
                 let old = match &value {
-                    Some(v) => rel.properties.insert(key.clone(), v.clone()),
+                    Some(v) => rel.properties.insert(key, v.clone(), &mut self.prop_keys),
                     None => rel.properties.remove(key),
                 };
                 let rel_type = rel.rel_type;
@@ -794,14 +852,37 @@ mod tests {
     }
 
     #[test]
+    fn index_postings_grow_and_shrink() {
+        let mut g = Graph::new(0);
+        g.apply(&Change::CreateIndex { name: "i".into(), label: "User".into(), key: "name".into() }).unwrap();
+        let mut undo = vec![];
+        for id in [3, 1, 2] {
+            undo.push(g.apply(&create_node(id, "User")).unwrap().unwrap()); // all named "x"
+        }
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from("x")), Some(vec![1, 2, 3]));
+        assert_eq!(g.count_by_property("User", "name", &Value::from("x")), Some(3));
+        let set = |id, v: &str| Change::SetNodeProperty { id, key: "name".into(), value: Some(v.into()), ts: 2 };
+        undo.push(g.apply(&set(1, "y")).unwrap().unwrap());
+        undo.push(g.apply(&set(2, "y")).unwrap().unwrap());
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from("x")), Some(vec![3]));
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from("y")), Some(vec![1, 2]));
+        assert_eq!(g.indexes()[0].entries, 3);
+        for c in undo.into_iter().rev() {
+            g.apply(&c).unwrap();
+        }
+        assert_eq!(g.nodes_by_property("User", "name", &Value::from("x")), Some(vec![]));
+        assert_eq!(g.indexes()[0].entries, 0);
+    }
+
+    #[test]
     fn set_property_inverse_restores_old_value() {
         let mut g = Graph::new(0);
         g.apply(&create_node(1, "User")).unwrap();
         let set = Change::SetNodeProperty { id: 1, key: "name".into(), value: Some("y".into()), ts: 5 };
         let inv = g.apply(&set).unwrap().unwrap();
-        assert_eq!(g.node(1).unwrap().properties["name"], Value::from("y"));
+        assert_eq!(g.node(1).unwrap().properties.get("name").cloned().unwrap(), Value::from("y"));
         g.apply(&inv).unwrap();
-        assert_eq!(g.node(1).unwrap().properties["name"], Value::from("x"));
+        assert_eq!(g.node(1).unwrap().properties.get("name").cloned().unwrap(), Value::from("x"));
         assert_eq!(g.node(1).unwrap().updated_at, 1);
     }
 }

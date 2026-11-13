@@ -3,6 +3,8 @@
 //! All integers are little-endian. Strings and byte arrays are length-prefixed
 //! with a u32. This encoding is independent of Rust's in-memory layout.
 
+use std::io::Read;
+
 use mygraph_core::{Change, MyGraphError, Op, PropertyMap, Result, Value};
 
 const MAX_DEPTH: usize = 64;
@@ -26,9 +28,6 @@ pub(crate) struct Encoder {
 impl Encoder {
     pub fn u8(&mut self, v: u8) {
         self.buf.push(v);
-    }
-    pub fn u16(&mut self, v: u16) {
-        self.buf.extend_from_slice(&v.to_le_bytes());
     }
     pub fn u32(&mut self, v: u32) {
         self.buf.extend_from_slice(&v.to_le_bytes());
@@ -95,8 +94,17 @@ impl Encoder {
     }
 
     pub fn properties(&mut self, m: &PropertyMap) -> Result<()> {
-        self.len(m.len())?;
-        for (k, v) in m {
+        self.entries(m.len(), m.iter().map(|(k, v)| (k.as_str(), v)))
+    }
+
+    /// Same encoding as [`Encoder::properties`], for stored properties.
+    pub fn stored_properties(&mut self, p: &mygraph_core::Properties) -> Result<()> {
+        self.entries(p.len(), p.iter())
+    }
+
+    fn entries<'a>(&mut self, len: usize, it: impl Iterator<Item = (&'a str, &'a Value)>) -> Result<()> {
+        self.len(len)?;
+        for (k, v) in it {
             self.str(k)?;
             self.value(v)?;
         }
@@ -219,49 +227,84 @@ impl Encoder {
     }
 }
 
-pub(crate) struct Decoder<'a> {
-    data: &'a [u8],
-    pos: usize,
+/// Reads the encoding from a byte slice or any [`Read`] (e.g. a buffered
+/// file), never taking more than the `len` bytes it was given, so a corrupt
+/// length cannot make it allocate more than the input holds.
+pub(crate) struct Decoder<R> {
+    src: R,
+    remaining: u64,
 }
 
 fn corrupt(msg: impl Into<String>) -> MyGraphError {
     MyGraphError::Corruption(msg.into())
 }
 
-impl<'a> Decoder<'a> {
+impl<'a> Decoder<&'a [u8]> {
     pub fn new(data: &'a [u8]) -> Self {
-        Decoder { data, pos: 0 }
+        Decoder { src: data, remaining: data.len() as u64 }
+    }
+}
+
+impl<R: Read> Decoder<R> {
+    pub fn from_reader(src: R, len: u64) -> Self {
+        Decoder { src, remaining: len }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.src
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pos >= self.data.len()
+        self.remaining == 0
     }
 
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.data.len() - self.pos < n {
+    /// Reads and discards whatever is left of the input.
+    pub fn skip_rest(&mut self) -> Result<()> {
+        let n = std::io::copy(&mut (&mut self.src).take(self.remaining), &mut std::io::sink())?;
+        self.remaining -= n;
+        Ok(())
+    }
+
+    fn reserve(&mut self, n: usize) -> Result<()> {
+        if (n as u64) > self.remaining {
             return Err(corrupt("unexpected end of data"));
         }
-        let s = &self.data[self.pos..self.pos + n];
-        self.pos += n;
-        Ok(s)
+        self.remaining -= n as u64;
+        Ok(())
+    }
+
+    fn fill(&mut self, buf: &mut [u8]) -> Result<()> {
+        self.reserve(buf.len())?;
+        self.src.read_exact(buf).map_err(|e| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => corrupt("unexpected end of data"),
+            _ => e.into(),
+        })
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut a = [0; N];
+        self.fill(&mut a)?;
+        Ok(a)
     }
 
     pub fn u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-    pub fn u16(&mut self) -> Result<u16> {
-        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+        Ok(self.array::<1>()?[0])
     }
     pub fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+        Ok(u32::from_le_bytes(self.array()?))
     }
     pub fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+        Ok(u64::from_le_bytes(self.array()?))
     }
 
     pub fn bytes(&mut self) -> Result<Vec<u8>> {
         let n = self.u32()? as usize;
-        Ok(self.take(n)?.to_vec())
+        if (n as u64) > self.remaining {
+            return Err(corrupt("unexpected end of data"));
+        }
+        let mut v = vec![0; n];
+        self.fill(&mut v)?;
+        Ok(v)
     }
 
     pub fn str(&mut self) -> Result<String> {

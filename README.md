@@ -487,6 +487,8 @@ cargo test --workspace                          # Rust tests
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets
 
 cargo run -p mygraph --example embedded         # embedded example
+cargo run --release -p mygraph --example bench        # latency benchmark
+cargo run --release -p mygraph --example tree_volume  # 1M-node tree: load time and memory
 cargo run -p mygraph-cli -- shell --data ./data # embedded shell on disk
 cargo run -p mygraph-server -- start --port 6660 --data ./data
 python3 python/examples/crud.py                 # needs the server above
@@ -555,7 +557,10 @@ inverted, the undo log used for rollback.
 ### Design decisions (v0.1)
 
 - **Storage:** the whole catalog is kept in memory and persisted as WAL plus
-  full snapshots, not in pages with a buffer pool. The `Store`
+  full snapshots, not in pages with a buffer pool. Properties are kept in
+  compact sorted arrays with shared key names, and snapshots are written
+  and read in chunks, so a graph of 1M nodes and 1M relationships needs
+  about 1 GB (1.5 GB peak while loading). The `Store`
   API is designed so the page-based store can replace it in Phase 3.
   `cache_size_mb` is accepted but has no effect yet.
 - **Concurrency:** one reader-writer lock per instance. Read-only scripts

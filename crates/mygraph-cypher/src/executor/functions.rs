@@ -126,11 +126,11 @@ pub(crate) fn call(env: &Env<'_>, name: &str, args: Vec<Val>) -> Result<Val> {
             let props: Vec<(String, Val)> = match &args[0] {
                 Val::Node(id) => g
                     .node(*id)
-                    .map(|x| x.properties.iter().map(|(k, v)| (k.clone(), Val::from_value(v))).collect())
+                    .map(|x| x.properties.iter().map(|(k, v)| (k.to_string(), Val::from_value(v))).collect())
                     .unwrap_or_default(),
                 Val::Rel(id) => g
                     .relationship(*id)
-                    .map(|x| x.properties.iter().map(|(k, v)| (k.clone(), Val::from_value(v))).collect())
+                    .map(|x| x.properties.iter().map(|(k, v)| (k.to_string(), Val::from_value(v))).collect())
                     .unwrap_or_default(),
                 Val::Map(m) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
                 other => {

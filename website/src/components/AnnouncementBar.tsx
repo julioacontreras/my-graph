@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { MINOR } from "../data/generated";
+import { VERSION } from "../data/generated";
 import { links } from "../data/links";
 
-const KEY = `mygraph-announce-${MINOR}-dismissed`;
+const KEY = `mygraph-announce-${VERSION}-dismissed`;
 
 export function AnnouncementBar() {
   const [open, setOpen] = useState(true);
@@ -22,7 +22,7 @@ export function AnnouncementBar() {
     <div className="relative bg-gradient-to-r from-primary/25 via-violet/20 to-primary/25 text-sm">
       <div className="mx-auto flex min-h-10 max-w-6xl items-center justify-center px-12 py-2 text-center">
         <a href={links.changelog} className="text-fg hover:underline underline-offset-4">
-          <span className="font-semibold">v{MINOR} is out:</span> weighted shortest paths, a path cache and concurrent reads{" "}
+          <span className="font-semibold">v{VERSION} is out:</span> about half the memory for large graphs{" "}
           <span aria-hidden="true">→</span>
         </a>
       </div>

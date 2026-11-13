@@ -272,18 +272,21 @@ impl Inner {
 
     /// Makes a journal durable. If the WAL write fails, the in-memory changes
     /// are rolled back so memory never runs ahead of disk.
-    fn persist(&mut self, db: &str, schema: &str, mut journal: Journal) -> Result<()> {
+    fn persist(&mut self, db: &str, schema: &str, journal: Journal) -> Result<()> {
         if journal.is_empty() {
             return Ok(());
         }
         let Some(store) = self.store.as_mut() else { return Ok(()) };
-        let ops = journal
-            .changes()
-            .iter()
-            .map(|c| Op::Graph { database: db.into(), schema: schema.into(), change: c.clone() })
-            .collect();
+        // The redo log moves into the WAL record; only the undo log is kept,
+        // in case the write fails.
+        let (redo, undo) = journal.into_parts();
+        let ops =
+            redo.into_iter().map(|change| Op::Graph { database: db.into(), schema: schema.into(), change }).collect();
         if let Err(e) = store.commit(ops) {
-            self.rollback_to(db, schema, &mut journal, 0)?;
+            let (graph, _) = self.catalog.database_mut(db)?.write_parts(schema)?;
+            for change in undo.iter().rev() {
+                graph.apply(change)?;
+            }
             return Err(e);
         }
         self.maybe_checkpoint()
