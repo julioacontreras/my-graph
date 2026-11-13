@@ -1,0 +1,31 @@
+name: Publish Rust client to crates.io
+
+# Publishes mygraph-core, mygraph-protocol and mygraph-client, in that
+# order (each depends on the previous one). The version is the workspace
+# version in the root Cargo.toml.
+
+on:
+  push:
+    tags: ["rs-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: crates-io
+      url: https://crates.io/crates/mygraph-client
+    permissions:
+      id-token: write   # crates.io trusted publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test
+        run: cargo test -p mygraph-core -p mygraph-protocol -p mygraph-client
+      - name: Get a crates.io token
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish -p mygraph-core -p mygraph-protocol -p mygraph-client
