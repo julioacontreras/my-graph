@@ -34,6 +34,8 @@ read data written by 0.4. Back up the data directory before upgrading.
 - `CALL` with built-in procedures: `db.labels()`, `db.relationshipTypes()`,
   `db.propertyKeys()`, `db.indexes()`, `db.constraints()`,
   `dbms.procedures()`, with `YIELD ... [AS ...]` and `WHERE`.
+- Python client 0.3.0 (`pip install -U mygraph-client`): `ConstraintError`
+  for the new `ConstraintViolation` error code.
 
 ### Changed
 
