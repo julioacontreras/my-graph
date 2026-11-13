@@ -537,32 +537,74 @@ To build the image locally: `docker build -t mygraph:dev .`
 
 ### Rust client (crates.io)
 
+Three crates are published to [crates.io](https://crates.io), always in
+this order because each depends on the previous one:
+`mygraph-core` → `mygraph-protocol` → `mygraph-client`. They use the
+workspace version from the root [`Cargo.toml`](Cargo.toml). Once they are
+published, anyone can install the client with `cargo add mygraph-client`
+(see [its README](crates/mygraph-client/README.md)).
+
 The workflow [`.github/workflows/crates.yml`](.github/workflows/crates.yml)
-publishes `mygraph-core`, `mygraph-protocol` and `mygraph-client` (in that
-order) with the workspace version when a tag `rs-vX.Y.Z` is pushed. It uses
-crates.io trusted publishing, so no token is stored in GitHub.
+publishes them when a tag `rs-vX.Y.Z` is pushed. It uses crates.io trusted
+publishing, so no token is stored in GitHub.
 
-One-time setup:
+#### One-time setup
 
-1. Sign in to [crates.io](https://crates.io) with GitHub and verify your
-   email in **Account Settings**.
-2. The first release must be done by hand, because trusted publishing can
-   only be set up for crates that already exist. Create an API token in
-   **Account Settings → API Tokens** (scopes `publish-new` and
-   `publish-update`), then:
+Publishing needs a crates.io account; the crates belong to the account
+that publishes them first.
+
+1. Sign in to [crates.io](https://crates.io) with your GitHub account.
+2. Verify your email in **Account Settings**. crates.io refuses to publish
+   without a verified email.
+3. Create an API token in **Account Settings → API Tokens** with the
+   scopes `publish-new` and `publish-update`.
+
+#### First release (by hand)
+
+Trusted publishing can only be set up for crates that already exist, so
+the first release is published from your machine, from an up-to-date
+`main`:
+
+```bash
+git checkout main && git pull
+cargo login            # paste the token from step 3
+cargo publish --dry-run -p mygraph-core -p mygraph-protocol -p mygraph-client
+cargo publish -p mygraph-core -p mygraph-protocol -p mygraph-client
+```
+
+The dry run packages and compiles the three crates without uploading
+them. After publishing, the crates appear at
+`https://crates.io/crates/<name>` within a minute, and the API docs at
+[docs.rs/mygraph-client](https://docs.rs/mygraph-client) a few minutes
+later.
+
+Then, for each of the three crates, open **Settings → Trusted Publishing**
+on crates.io and add: repository `julioacontreras/my-graph`, workflow
+`crates.yml`, environment `crates-io`.
+
+#### Later releases
+
+1. Increase `version` in the root `Cargo.toml` and add it to
+   [CHANGELOG.md](CHANGELOG.md).
+2. Run the checks from the server release steps above and push to `main`.
+3. Push a tag `rs-` + the version:
 
    ```bash
-   cargo login            # paste the token
-   cargo publish -p mygraph-core -p mygraph-protocol -p mygraph-client
+   git tag rs-v0.3.2
+   git push origin rs-v0.3.2
    ```
 
-3. For each of the three crates, open **Settings → Trusted Publishing** on
-   crates.io and add the GitHub repository `julioacontreras/my-graph`,
-   workflow `crates.yml`, environment `crates-io`.
+4. Check the run in the **Actions** tab.
 
-Later releases: bump the workspace version, then `git tag rs-v0.3.2 && git push origin rs-v0.3.2`.
-A version can never be published twice, and published code cannot be
-deleted (only yanked).
+Rules of crates.io:
+
+- A version can be published only once. To fix a mistake, publish a new
+  version.
+- Published code cannot be deleted. A broken version can be *yanked* so
+  new projects do not pick it, while existing lockfiles keep working:
+  `cargo yank --version 0.3.1 mygraph-client` (undo with `--undo`).
+- Release the client again when the protocol changes, so it can read the
+  new values.
 
 ### Python client (PyPI)
 
