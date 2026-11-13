@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.1
+
+About half the memory for large graphs. A tree of 1,082,401 nodes and
+1,082,400 relationships (the volume test of the benchmark report, where
+0.3.0 ran out of memory in a 6 GB container) now loads with a 1.5 GB peak
+instead of 2.8 GB.
+
+### Changed
+
+- Node and relationship properties are stored in one exact-size array
+  sorted by key, and each key name is stored once per graph and shared.
+  Before, every node with properties allocated a whole tree node (~650
+  bytes) and its own copy of every key. Memory after loading the tree:
+  2,025 MB → 1,055 MB.
+- A property index stores a value held by a single node without a set per
+  value, so unique properties such as ids cost a few bytes per node.
+- Checkpoints write the snapshot to disk in 1 MB chunks, and startup reads
+  it the same way, instead of building the whole file in memory (twice
+  when writing). A checkpoint of the tree used 413 MB more memory before
+  and uses 8 MB now.
+- A commit moves its changes into the WAL record instead of copying them.
+- Query latencies are unchanged.
+- New example `examples/tree_volume.rs` loads the tree and prints memory
+  as it goes.
+
+### Upgrade notes
+
+- The snapshot, WAL and protocol formats are unchanged: 0.3.1 and 0.3.0
+  read each other's data.
+
 ## 0.3.0
 
 Faster searches and weighted shortest paths, following the search engine
