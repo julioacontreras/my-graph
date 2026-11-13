@@ -2,7 +2,7 @@ import data from "../../data/benchmarks.json";
 import { Section } from "../ui/Section";
 import { Callout } from "../ui/Callout";
 import { LoadChart, MemoryChart, SearchSumChart } from "./Charts";
-import { LicenseTable, SearchTable, SummaryTable, UpdateTable } from "./Tables";
+import { LicenseTable, SearchTable, SummaryTable, UpdateTable, VolumeTable } from "./Tables";
 
 function Sub({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -27,8 +27,9 @@ export function Benchmarks() {
       }
     >
       <Callout title={`Measured on MyGraph v${data.mygraphVersion}.`}>
-        With property indexes and the query planner, the ×500 load went from 28.1 s (v0.1) to 5.5 s. The test queries
-        still use the v0.1 workarounds, so the traversals do not yet use the new variable-length paths.
+        Since v0.2, the 13 searches went from 769 ms to 557 ms in total, and memory after the ×500 load from 280 MB to
+        186 MB. The ×500 load takes 5.2 s (28.1 s in v0.1). The test queries still use the v0.1 workarounds, so the
+        traversals do not yet use variable-length paths.
       </Callout>
 
       <ul className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -59,9 +60,10 @@ export function Benchmarks() {
         <SearchTable />
         <p className="mt-3 text-xs leading-relaxed text-muted">
           For MyGraph, Q1, Q5, Q6, Q7 and Q12 still walk the graph from the application, and Q8 and Q11 are split into
-          several queries, as in v0.1. v0.2 supports variable-length paths and{" "}
-          <code className="inline-code">shortestPath</code>, but the test queries have not been rewritten yet. Property
-          indexes are created by hand, the same ones as in Neo4j.
+          several queries, as in v0.1. MyGraph supports variable-length paths and{" "}
+          <code className="inline-code">shortestPath</code> since v0.2, but the test queries have not been rewritten
+          yet, so most of the v0.3 search improvements do not show here. Property indexes are created by hand, the same
+          ones as in Neo4j.
         </p>
       </Sub>
 
@@ -70,6 +72,19 @@ export function Benchmarks() {
         <UpdateTable />
         <p className="mt-3 text-xs leading-relaxed text-muted">
           U3, U3b and U4 run once (single timing).
+        </p>
+      </Sub>
+
+      <Sub title="Volume test: a tree of 1 million nodes">
+        <p className="mb-4 text-sm text-muted">
+          {data.volume.caption}. Loaded into an empty database in batches of 10,000. Times in ms (p50, warm). Bold =
+          best in the row.
+        </p>
+        <VolumeTable />
+        <p className="mt-3 text-xs leading-relaxed text-muted">
+          MyGraph completes every test and is the fastest at the short traversals (T3, T4), but this is where it loses
+          most: the load takes 210.5 s and memory reaches 5,949 MB, close to the 6 GB limit, and the count per level
+          (T5) is the slowest. Dgraph ran out of memory after T4 and restarted.
         </p>
       </Sub>
 
@@ -95,6 +110,7 @@ export function Benchmarks() {
           <ul className="list-disc space-y-2 pl-5">
             <li><strong className="text-fg">Dataset:</strong> a hand-written base system (131 nodes, 226 relationships) of legacy programs, jobs, tables and their translation layers, cloned and cross-linked to three scales, so long traversals cross subsystems. It includes dangling relationships, a call cycle and dead code on purpose.</li>
             <li><strong className="text-fg">Tests:</strong> load in batches of 1,000; 13 searches; 7 updates (with their reverse where it applies).</li>
+            <li><strong className="text-fg">Volume test:</strong> apart from the scales, a full tree of 1,082,401 nodes (4 levels, 32 children per node; 1,048,576 leaves) is loaded, traversed at several depths and modified. The first run of each search is checked against the result computed from the shape of the tree.</li>
             <li><strong className="text-fg">Runs:</strong> each search once cold and 10 times warm; the median (p50) is reported.</li>
             <li><strong className="text-fg">Correctness:</strong> all five engines return the same number of rows in every test and scale.</li>
             <li><strong className="text-fg">Environment:</strong> a laptop, Podman on macOS. Each engine measured alone (the others stopped), limited to 4 CPU and 6 GB, on a clean volume. Neo4j and ArcadeDB memory set by hand (Neo4j 2 GB heap + 2 GB page cache; ArcadeDB 3 GB heap + 1 GB pages).</li>

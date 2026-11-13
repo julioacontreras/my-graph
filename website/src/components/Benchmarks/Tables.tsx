@@ -44,6 +44,7 @@ const minIndex = (vals: (number | null)[]) => {
   vals.forEach((v, i) => { if (v !== null && (best < 0 || v < (vals[best] as number))) best = i; });
   return best;
 };
+const minValue = (vals: (number | null)[]) => Math.min(...vals.filter((v): v is number => v !== null));
 
 export function SummaryTable() {
   return (
@@ -95,6 +96,38 @@ export function UpdateTable() {
             </th>
             {r.values.map((v, i) => (
               <Cell key={i} best={i === best} my={i === MY}>
+                {v === null ? <span className="font-sans text-danger">crashed (OOM)</span> : fmt(v)}
+              </Cell>
+            ))}
+          </tr>
+        );
+      })}
+    </Table>
+  );
+}
+
+export function VolumeTable() {
+  const loadMin = minValue(data.volume.loadSeconds);
+  const memMin = minValue(data.volume.memoryMB);
+  return (
+    <Table caption={`Volume test. ${data.volume.caption}`} firstCol="Test">
+      <tr>
+        <th scope="row" className="px-4 py-2.5 font-medium">Load (s)</th>
+        {data.volume.loadSeconds.map((v, i) => <Cell key={i} best={v === loadMin} my={i === MY}>{v.toFixed(1)}</Cell>)}
+      </tr>
+      <tr>
+        <th scope="row" className="px-4 py-2.5 font-medium">Memory after load (MB)</th>
+        {data.volume.memoryMB.map((v, i) => <Cell key={i} best={v === memMin} my={i === MY}>{fmtInt(v)}</Cell>)}
+      </tr>
+      {data.volume.rows.map((r) => {
+        const min = minValue(r.values);
+        return (
+          <tr key={r.id}>
+            <th scope="row" className="px-4 py-2.5 font-medium">
+              <span className="mr-2 font-mono text-xs text-link">{r.id}</span>{r.label} <span className="text-xs font-normal text-muted">(ms)</span>
+            </th>
+            {r.values.map((v, i) => (
+              <Cell key={i} best={v === min} my={i === MY}>
                 {v === null ? <span className="font-sans text-danger">crashed (OOM)</span> : fmt(v)}
               </Cell>
             ))}

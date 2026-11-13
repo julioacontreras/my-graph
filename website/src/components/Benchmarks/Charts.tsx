@@ -97,8 +97,8 @@ export function LoadChart() {
         ))}
       </div>
       <p className="mt-5 text-xs leading-relaxed text-muted">
-        v0.1 had no property indexes, so every batch of relationships scanned all nodes. In v0.2, with an index on the
-        lookup key, the ×500 load takes 5.5 s instead of 28.1 s. Keeping the indexes up to date costs some throughput at
+        v0.1 had no property indexes, so every batch of relationships scanned all nodes. With an index on the lookup key
+        (since v0.2), the ×500 load takes 5.2 s instead of 28.1 s. Keeping the indexes up to date costs some throughput at
         ×500.
       </p>
     </figure>

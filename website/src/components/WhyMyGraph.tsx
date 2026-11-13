@@ -8,7 +8,7 @@ const typical = [
 ];
 const ours = [
   "One Rust binary, no garbage collector",
-  "280 MB after loading 100k relationships*",
+  "186 MB after loading 100k relationships*",
   "A library in your process, or a TCP server",
   "MIT licensed: ship it inside your product",
 ];
@@ -65,8 +65,8 @@ export function WhyMyGraph() {
         </figure>
       </div>
       <p className="mt-5 text-xs text-muted">
-        * Memory after load at ×500 (50,677 nodes, 100,525 relationships), measured on MyGraph v0.2.0. Neo4j used 2,806 MB
-        and ArcadeDB 3,399 MB in the same test, mostly memory pre-allocated to the JVM.{" "}
+        * Memory after load at ×500 (50,677 nodes, 100,525 relationships), measured on MyGraph v0.3.1. Neo4j used 2,808 MB
+        and ArcadeDB 3,398 MB in the same test, mostly memory pre-allocated to the JVM.{" "}
         <a href="#benchmarks" className="link">See the benchmark</a>.
       </p>
     </Section>

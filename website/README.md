@@ -17,7 +17,7 @@ BASE_PATH=/my-graph/ npm run build          # serve from a sub-path (GitHub Page
 |---|---|
 | Version | Root `Cargo.toml` (`scripts/build-data.mjs` → `src/data/generated.ts`) |
 | GitHub stars | GitHub API at build time, refreshed in the browser |
-| Benchmark numbers | `src/data/benchmarks.json` (from the v0.1 benchmark report). Never type numbers into components |
+| Benchmark numbers | `src/data/benchmarks.json` (from the benchmark report, `docs/informe-benchmark-grafos.pdf`). Never type numbers into components |
 | Code snippets | `src/data/snippets/*`, highlighted by Shiki at build time (`scripts/highlight-snippets.mjs`) |
 | `/llms-full.txt` | README "Usage" + "Reference" + "Status" (`scripts/build-llms.mjs`) |
 | `/docker-compose.yml` | Copied from the repo root |

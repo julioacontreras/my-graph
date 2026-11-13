@@ -33,7 +33,7 @@ export function GetStarted() {
           <Callout title="Create an index on every property you use to find nodes.">
             <p>
               Indexes are <strong>not automatic</strong>. This is the most important performance tip: in our benchmark
-              the 100k-relationship load went from 28.1 s to 5.5 s once the lookup key was indexed.
+              the 100k-relationship load went from 28.1 s to 5.2 s once the lookup key was indexed.
             </p>
             <div className="mt-3"><CodeWindow id="index" filename="index.cypher" /></div>
           </Callout>
